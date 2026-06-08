@@ -111,7 +111,8 @@ def fetch_crypto_signals():
 @st.cache_data(ttl=3600)
 def fetch_squeezemetrics_data():
     """开关1 & 开关5：获取 SqueezeMetrics 的 DIX 和 GEX 数据（带24小时本地缓存与UA伪装机制）"""
-    url = "https://squeezemetrics.com/api/dix.csv"
+    # 💡 核心修复：修改为官方正确的静态数据大写地址
+    url = "https://squeezemetrics.com/monitor/static/DIX.csv" 
     cache_file = "dix_cache.csv"
     cooldown_seconds = 24 * 60 * 60  # 24 小时下载冷却时间
     
@@ -126,7 +127,7 @@ def fetch_squeezemetrics_data():
             
     if should_download:
         try:
-            # 2. 核心改进：添加复杂的浏览器 Headers 模拟真实访问，直接绕过防代码抓取的防火墙
+            # 2. 模拟真实浏览器 Headers 绕过基本防火墙
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -136,17 +137,20 @@ def fetch_squeezemetrics_data():
             if response.status_code == 200 and "dix" in response.text.lower():
                 with open(cache_file, "w", encoding="utf-8") as f:
                     f.write(response.text)
-                st.sidebar.success("🔄 DIX/GEX 数据已成功从官网刷新并写入本地缓存！")
+                st.sidebar.success("🔄 DIX/GEX 官方真实数据已成功刷新并写入本地缓存！")
             else:
                 st.sidebar.warning(f"⚠️ 官网响应异常(状态码:{response.status_code})，将使用历史本地缓存。")
         except Exception as e:
             st.sidebar.warning(f"⚠️ 无法连接 SqueezeMetrics 官网 ({e})，将尝试读取历史本地缓存。")
             
-    # 3. 多重容错保障与解析逻辑（补全之前缺失的代码断点）
+    # 3. 多重容错保障与解析逻辑
     if os.path.exists(cache_file):
         try:
             df = pd.read_csv(cache_file)
             if not df.empty:
+                # 💡 稳健性优化：将所有列名强制转换为小写，防止因官方表头是大写（DATE, DIX, GEX）导致后续代码 KeyError
+                df.columns = df.columns.str.lower()
+                
                 latest = df.iloc[-1]
                 dix_val = float(latest['dix'])
                 # 如果 csv 里是 0.45 这样的绝对小数，换算成百分比 45.0
@@ -163,6 +167,26 @@ def fetch_squeezemetrics_data():
                     "df": df.tail(100),
                     "is_mock": False
                 }
+        except Exception as e:
+            st.sidebar.error(f"❌ 解析本地缓存文件失败: {e}")
+
+    # 4. 终极兜底机制：若无任何本地缓存或读取失败，自动生成模拟数据保证 UI 不崩溃
+    dates = pd.date_range(end=datetime.date.today(), periods=100)
+    mock_df = pd.DataFrame({
+        'date': dates,
+        'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,  # 围绕 44% 波动
+        'gex': np.random.normal(loc=500000000, scale=1000000000, size=100)
+    })
+    latest = mock_df.iloc[-1]
+    return {
+        "dix": round(latest['dix'], 2), 
+        "gex": int(latest['gex']),
+        "dix_active": latest['dix'] >= 45.0, 
+        "gex_active": latest['gex'] > 0,
+        "error": False, 
+        "df": mock_df, 
+        "is_mock": True
+    }
         except Exception as e:
             st.sidebar.error(f"❌ 解析本地缓存文件失败: {e}")
 
