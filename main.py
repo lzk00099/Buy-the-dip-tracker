@@ -44,6 +44,22 @@ st.markdown("""
     .badge-bottom { background-color: #3498db; color: white; }
     .badge-warning { background-color: #f39c12; color: white; }
     .badge-exit { background-color: #e74c3c; color: white; }
+
+    /* 新增指示灯动效样式 */
+    .indicator-bar {
+        padding: 10px 18px;
+        border-radius: 6px;
+        font-weight: bold;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 20px;
+    }
+    .indicator-real { background-color: #e8f8f0; color: #1e7e34; border: 1px solid #d4edda; }
+    .indicator-mock { background-color: #fdf2f2; color: #9b1c1c; border: 1px solid #fde8e8; }
+    .dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; }
+    .dot-real { background-color: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+    .dot-mock { background-color: #e74c3c; box-shadow: 0 0 8px #e74c3c; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -72,27 +88,22 @@ def fetch_vix_data():
 def fetch_crypto_signals():
     """开关3：获取加密货币资产永续合约资金费率与OI趋势（切换至 OKX API 替代）"""
     try:
-        # OKX 获取资金费率 (BTC-USDT 永续)
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
         
         if fr_res.get("code") != "0":
             return {"error": True, "msg": "OKX API 响应异常", "active": False}
             
-        # 提取资金费率并转为百分比
         funding_rate = float(fr_res['data'][0]['fundingRate']) * 100 
         
-        # OKX 获取当前未平仓量(OI)
         oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
         oi_res = requests.get(oi_url, timeout=5).json()
         
         if oi_res.get("code") != "0":
             return {"error": True, "msg": "获取 OI 数据异常", "active": False}
             
-        # 提取未平仓量（以 USDT 计价）
         open_interest = float(oi_res['data'][0]['oiCcy'])
         
-        # 逻辑：费率转正(>= 0.0)视为企稳
         is_active = funding_rate >= 0.0
         status = "资金费率转正 + OI企稳" if is_active else "费率倒挂或情绪悲观"
         
@@ -118,20 +129,24 @@ def fetch_squeezemetrics_data():
             gex_val = float(latest['gex'])
             
             dix_active = dix_val >= 45.0
-            gex_active = gex_val > 0  # 翻回正值
+            gex_active = gex_val > 0  
             
+            # 💡 升级1：成功获取时，明牌标记 is_mock=False，并解析数据中的最新日期
+            scraped_date = str(latest['date']) if 'date' in latest else "已连通"
             return {
                 "dix": round(dix_val, 2),
                 "gex": int(gex_val),
                 "dix_active": dix_active,
                 "gex_active": gex_active,
                 "error": False,
-                "df": df.tail(100) # 返回近100天供绘图
+                "df": df.tail(100),
+                "is_mock": False,
+                "scraped_date": scraped_date
             }
     except Exception as e:
         pass
     
-    # 模拟Fallback数据以确保代码在无外部访问时正常渲染逻辑
+    # 🛡️ Fallback数据：网络不通或遭遇阻断时启用
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates,
@@ -142,35 +157,26 @@ def fetch_squeezemetrics_data():
     return {
         "dix": round(latest['dix'] * 100, 2), "gex": int(latest['gex']),
         "dix_active": (latest['dix'] * 100) >= 45.0, "gex_active": latest['gex'] > 0,
-        "error": False, "df": mock_df, "is_mock": True
+        "error": False, "df": mock_df, "is_mock": True, "scraped_date": "⚠️ 网页受阻(切换至历史均值模拟)"
     }
 
 @st.cache_data(ttl=3600)
 def calculate_cta_and_correlation():
     """开关4 & 开关6：通过常规指数计算CTA抛压动量代理与全局相关性见顶回落代理"""
     try:
-        # 获取QQQ及前五大权重股历史数据用来计算相关性
         tickers = ['QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL']
         data = yf.download(tickers, period='6mo', progress=False)['Close']
         
-        # 1. CTA抛压耗尽判断 (通过QQQ距离200日均线的偏离度及RSI超卖回弹模拟)
         qqq = data['QQQ']
         ma200 = qqq.rolling(200).mean()
-        ma50 = qqq.rolling(50).mean()
         
-        # 伪逻辑：当价格严重跌破均线后开始走平，或者偏离度开始收敛，视为抛压耗尽
         latest_price = qqq.iloc[-1]
         latest_ma200 = ma200.iloc[-1] if not ma200.isna().all() else latest_price * 1.05
         dist_to_200 = (latest_price - latest_ma200) / latest_ma200
         
-        # 假设跌幅深且止跌或重新收复短期均线视为耗尽
-        cta_active = dist_to_200 > -0.15 # 偏离度未跌破极端清算线，或开始触底反弹
+        cta_active = dist_to_200 > -0.15 
         
-        # 2. 全局相关性 (计算5大权重股与QQQ的20日滚动相关性均值)
         returns = data.pct_change().dropna()
-        corr_matrix = returns.rolling(20).corr()
-        
-        # 提取各个股票与QQQ的相关性并求均值
         corrs = []
         for t in tickers[1:]:
             if t in returns.columns:
@@ -178,8 +184,7 @@ def calculate_cta_and_correlation():
                 corrs.append(c)
         avg_corr = np.mean(corrs) if corrs else 0.85
         
-        # 相关性极高(>0.85)往往代表恐慌盘无差别抛售，随后见顶回落(<0.80)代表离散度回归
-        prev_corr = 0.88 # 模拟前值
+        prev_corr = 0.88 
         corr_active = avg_corr < 0.80 and prev_corr >= 0.85
         
         return {
@@ -229,7 +234,7 @@ switches = [
         "name": "加密资金费率转正 + OI 企稳",
         "active": crypto_data["active"] if not crypto_data["error"] else False,
         "value": f"Rate: {crypto_data.get('funding_rate', 'N/A')} | OI: {crypto_data.get('oi', 'N/A')}",
-        "source": "Binance 永续合约 API",
+        "source": "OKX 永续合约 API",
         "interpretation": "抄底信号 / 风险偏好回升",
         "interpretation_desc": "加密市场作为全球离岸高杠杆流动性的前哨。当费率跌为负数（空头付利息给多头）后重新转正，伴随持仓量(OI)在低位横盘企稳，代表散户恐慌割肉盘结束，主力左侧资金重新建仓，多头杠杆力量恢复。",
         "latency": "高频实时 (每几分钟更新)",
@@ -279,7 +284,29 @@ active_count = sum([1 for s in switches if s["active"]])
 
 # 标题区
 st.title("🛡️ Sentinel 核心决策系统：大盘微观结构见底看板")
-st.subheader(f"数据快照时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+# 💡 升级2：渲染数据流源头硬件级指示灯 (放在快照时间行)
+is_mock_data = sm_data.get("is_mock", False)
+scraped_date = sm_data.get("scraped_date", "N/A")
+
+if is_mock_data:
+    indicator_html = f"""
+    <div class="indicator-bar indicator-mock">
+        <span class="dot dot-mock"></span>
+        <span><b>数据链路状态：</b> Cloudflare 阻断 / 连通失败。当前正在运行 <b>[静态仿真模拟数据]</b>。仅供UI排版测试，切勿用于实战决策！</span>
+    </div>
+    """
+else:
+    indicator_html = f"""
+    <div class="indicator-bar indicator-real">
+        <span class="dot dot-real"></span>
+        <span><b>数据链路状态：</b> 实战正线连通。暗池核心数据同步成功（最新归属交易日: <b>{scraped_date}</b>）。</span>
+    </div>
+    """
+
+# 渲染指示灯
+st.markdown(indicator_html, unsafe_allow_html=True)
+st.subheader(f"⏱️ 页面数据刷新快照时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # 综合诊断面板 (Master Dashboard Banner)
 st.markdown("### 📊 综合大盘状态及应对措施")
@@ -360,7 +387,7 @@ else:
 st.markdown("""
 ---
 💡 **Sentinel 看板运维提示**：
-1. **Binance API** 无需 API Key 即可直接调用公共端点（代码中已直接对接）。
+1. **OKX API** 无需 API Key 即可直接调用公共端点（代码中已直接对接）。
 2. **Yahoo Finance (`yfinance`)** 依仗网络通畅度，若在国内环境运行部署，需确保本地/服务器已配置全局科学上网代理，或在 `yf.download` 中传入 `proxy` 参数。
-3. **SqueezeMetrics** 官方 CSV 存在反爬机制，生产环境中建议将其下载逻辑移至后端定时任务（Cron Job），将其持久化到本地 MySQL/SQLite 后再由 Streamlit 读取，以提升看板加载速度。
+3. **SqueezeMetrics官方反爬频繁**：如果上方指示灯长时间显示为**红色模拟模式**，强烈建议采用上文提到的 **GitHub Actions 每日单次同步落地方案**。
 """)
