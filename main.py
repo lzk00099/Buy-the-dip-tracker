@@ -4,6 +4,7 @@ import numpy as np
 import yfinance as yf
 import requests
 import datetime
+import io
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -105,12 +106,25 @@ def fetch_crypto_signals():
         # 异常兜底逻辑
         return {"error": True, "msg": str(e), "active": False}
 
+import io # 需要在文件顶部确保引入了 io
+
 @st.cache_data(ttl=86400)
 def fetch_squeezemetrics_data():
     """开关1 & 开关5：尝试获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
     url = "https://squeezemetrics.com/api/dix.csv"
     try:
-        df = pd.read_csv(url, timeout=10)
+        # 1. 添加 User-Agent 伪装成真实的浏览器
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+        
+        # 2. 用 requests 获取数据，带上 headers
+        req = requests.get(url, headers=headers, timeout=10)
+        req.raise_for_status() # 如果被拦截(非200状态码)，直接抛出异常进入模拟数据
+        
+        # 3. 将拿到的文本数据喂给 pandas
+        df = pd.read_csv(io.StringIO(req.text))
+        
         if not df.empty:
             latest = df.iloc[-1]
             dix_val = float(latest['dix']) * 100
@@ -125,10 +139,14 @@ def fetch_squeezemetrics_data():
                 "dix_active": dix_active,
                 "gex_active": gex_active,
                 "error": False,
-                "df": df.tail(100) # 返回近100天供绘图
+                "df": df.tail(100), # 返回近100天供绘图
+                "is_mock": False    # 增加一个真实数据标记
             }
     except Exception as e:
+        print(f"SqueezeMetrics 抓取失败: {e}") # 在终端打印真实报错原因，方便你排查
         pass
+    
+    # ... 下面保留你原有的 Fallback (Mock) 逻辑 ...
     
     # 模拟Fallback数据以确保代码在无外部访问时正常渲染逻辑
     dates = pd.date_range(end=datetime.date.today(), periods=100)
