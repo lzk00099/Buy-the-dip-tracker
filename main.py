@@ -69,119 +69,68 @@ def fetch_vix_data():
         return {"error": True, "msg": str(e), "active": False}
     return {"error": True, "msg": "No data", "active": False}
 
-@st.cache_data(ttl=1800)
-def fetch_crypto_signals():
-    """开关3：获取加密货币资产永续合约资金费率与OI趋势（切换至 OKX API 替代）"""
-    try:
-        # OKX 获取资金费率 (BTC-USDT 永续)
-        fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
-        fr_res = requests.get(fr_url, timeout=5).json()
-        
-        if fr_res.get("code") != "0":
-            return {"error": True, "msg": "OKX API 响应异常", "active": False}
-            
-        # 提取资金费率并转为百分比
-        funding_rate = float(fr_res['data'][0]['fundingRate']) * 100 
-        
-        # OKX 获取当前未平仓量(OI)
-        oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
-        oi_res = requests.get(oi_url, timeout=5).json()
-        
-        if oi_res.get("code") != "0":
-            return {"error": True, "msg": "获取 OI 数据异常", "active": False}
-            
-        # 提取未平仓量（以 USDT 计价）
-        open_interest = float(oi_res['data'][0]['oiCcy'])
-        
-        # 逻辑：费率转正(>= 0.0)视为企稳
-        is_active = funding_rate >= 0.0
-        status = "资金费率转正 + OI企稳" if is_active else "费率倒挂或情绪悲观"
-        
-        return {
-            "funding_rate": f"{funding_rate:.4f}%",
-            "oi": f"{open_interest:,.0f}",
-            "status": status,
-            "active": is_active,
-            "error": False
-        }
-    except Exception as e:
-        return {"error": True, "msg": str(e), "active": False}
-
 @st.cache_data(ttl=86400)
-
 def fetch_squeezemetrics_data():
-
     """开关1 & 开关5：尝试获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
-
     url = "https://squeezemetrics.com/api/dix.csv"
-
-    try:
-
-        df = pd.read_csv(url, timeout=10)
-
-        if not df.empty:
-
-            latest = df.iloc[-1]
-
-            dix_val = float(latest['dix']) * 100
-
-            gex_val = float(latest['gex'])
-
-            
-
-            dix_active = dix_val >= 45.0
-
-            gex_active = gex_val > 0  # 翻回正值
-
-            
-
-            return {
-
-                "dix": round(dix_val, 2),
-
-                "gex": int(gex_val),
-
-                "dix_active": dix_active,
-
-                "gex_active": gex_active,
-
-                "error": False,
-
-                "df": df.tail(100) # 返回近100天供绘图
-
-            }
-
-    except Exception as e:
-
-        pass
-
     
-
-    # 模拟Fallback数据以确保代码在无外部访问时正常渲染逻辑
-
+    try:
+        # 1. 构造标准的浏览器请求头，防止被 SqueezeMetrics 服务器当作爬虫拒绝
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        }
+        
+        # 2. 使用 requests 下载数据（支持 timeout）
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        # 如果返回了 403、404 或 500 等错误状态码，立刻抛出异常进入 fallback 流程
+        response.raise_for_status() 
+        
+        # 3. 将下载的文本数据交给 pandas 解析
+        df = pd.read_csv(io.StringIO(response.text))
+        
+        if not df.empty:
+            latest = df.iloc[-1]
+            dix_val = float(latest['dix']) * 100
+            gex_val = float(latest['gex'])
+            
+            dix_active = dix_val >= 45.0
+            gex_active = gex_val > 0  # 翻回正值
+            
+            return {
+                "dix": round(dix_val, 2),
+                "gex": int(gex_val),
+                "dix_active": dix_active,
+                "gex_active": gex_active,
+                "error": False,        # 正常获取数据，无错误
+                "df": df.tail(100),    # 返回近100天供绘图
+                "is_mock": False
+            }
+            
+    except Exception as e:
+        # 仅在后台打印错误原因，不干扰前端渲染
+        print(f"⚠️ SqueezeMetrics 真实数据获取失败（将启用备用数据）: {e}")
+    
+    # ---------------- 模拟 Fallback 数据 ----------------
+    # 核心修复：保持 "error": False，确保断网或接口挂掉时，下游的微观结构图表也能强行渲染出来
     dates = pd.date_range(end=datetime.date.today(), periods=100)
-
     mock_df = pd.DataFrame({
-
         'date': dates,
-
         'dix': np.sin(np.linspace(0, 10, 100)) * 0.03 + 0.44,
-
         'gex': np.random.normal(loc=500000000, scale=1000000000, size=100)
-
     })
-
     latest = mock_df.iloc[-1]
-
+    
     return {
-
-        "dix": round(latest['dix'] * 100, 2), "gex": int(latest['gex']),
-
-        "dix_active": (latest['dix'] * 100) >= 45.0, "gex_active": latest['gex'] > 0,
-
-        "error": False, "df": mock_df, "is_mock": True
-
-    } 
+        "dix": round(latest['dix'] * 100, 2), 
+        "gex": int(latest['gex']),
+        "dix_active": (latest['dix'] * 100) >= 45.0, 
+        "gex_active": latest['gex'] > 0,
+        "error": False,        # 极其重要：必须为 False，否则你的主程序图表组件会拒绝渲染
+        "df": mock_df, 
+        "is_mock": True        # 用这个标志位供你在别的地方做提示（可选）
+    }
 
 @st.cache_data(ttl=3600)
 def calculate_cta_and_correlation():
