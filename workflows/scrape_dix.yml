@@ -1,0 +1,23 @@
+name: Sync SqueezeMetrics DIX Data
+on:
+  schedule:
+    - cron: '0 5 * * *' # 每天国际标准时间 05:00 自动运行
+  workflow_dispatch: # 支持手动点击运行
+
+jobs:
+  download_data:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    - name: Download CSV with Browser User-Agent
+      run: |
+        curl -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+             -o dix_cache.csv "https://squeezemetrics.com/api/dix.csv"
+    - name: Commit and Push if changed
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add dix_cache.csv
+        git diff-index --quiet HEAD || git commit -m "🔄 定时自动更新大盘微观 DIX 缓存数据"
+        git push
