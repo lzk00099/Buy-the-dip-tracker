@@ -69,6 +69,44 @@ def fetch_vix_data():
         return {"error": True, "msg": str(e), "active": False}
     return {"error": True, "msg": "No data", "active": False}
 
+@st.cache_data(ttl=1800)
+def fetch_crypto_signals():
+    """开关3：获取加密货币资产永续合约资金费率与OI趋势（切换至 OKX API 替代）"""
+    try:
+        # OKX 获取资金费率 (BTC-USDT 永续)
+        fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
+        fr_res = requests.get(fr_url, timeout=5).json()
+        
+        if fr_res.get("code") != "0":
+            return {"error": True, "msg": "OKX API 响应异常", "active": False}
+            
+        # 提取资金费率并转为百分比
+        funding_rate = float(fr_res['data'][0]['fundingRate']) * 100 
+        
+        # OKX 获取当前未平仓量(OI)
+        oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
+        oi_res = requests.get(oi_url, timeout=5).json()
+        
+        if oi_res.get("code") != "0":
+            return {"error": True, "msg": "获取 OI 数据异常", "active": False}
+            
+        # 提取未平仓量（以 USDT 计价）
+        open_interest = float(oi_res['data'][0]['oiCcy'])
+        
+        # 逻辑：费率转正(>= 0.0)视为企稳
+        is_active = funding_rate >= 0.0
+        status = "资金费率转正 + OI企稳" if is_active else "费率倒挂或情绪悲观"
+        
+        return {
+            "funding_rate": f"{funding_rate:.4f}%",
+            "oi": f"{open_interest:,.0f}",
+            "status": status,
+            "active": is_active,
+            "error": False
+        }
+    except Exception as e:
+        return {"error": True, "msg": str(e), "active": False}
+
 @st.cache_data(ttl=86400)
 def fetch_squeezemetrics_data():
     """开关1 & 开关5：尝试获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
