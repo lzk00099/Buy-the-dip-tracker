@@ -187,26 +187,6 @@ def fetch_squeezemetrics_data():
         "df": mock_df, 
         "is_mock": True
     }
-        except Exception as e:
-            st.sidebar.error(f"❌ 解析本地缓存文件失败: {e}")
-
-    # 4. 终极兜底机制：若无任何本地缓存或读取失败，自动生成模拟数据保证 UI 不崩溃
-    dates = pd.date_range(end=datetime.date.today(), periods=100)
-    mock_df = pd.DataFrame({
-        'date': dates,
-        'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,  # 围绕 44% 波动
-        'gex': np.random.normal(loc=500000000, scale=1000000000, size=100)
-    })
-    latest = mock_df.iloc[-1]
-    return {
-        "dix": round(latest['dix'], 2), 
-        "gex": int(latest['gex']),
-        "dix_active": latest['dix'] >= 45.0, 
-        "gex_active": latest['gex'] > 0,
-        "error": False, 
-        "df": mock_df, 
-        "is_mock": True
-    }
 
 @st.cache_data(ttl=3600)
 def calculate_cta_and_correlation():
