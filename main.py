@@ -71,30 +71,32 @@ def fetch_vix_data():
 
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
-    """开关3：获取加密货币资产永续合约资金费率与OI趋势（以Binance BTCUSDT为例）"""
+    """开关3：获取加密货币资产永续合约资金费率与OI趋势（切换至 OKX API 替代）"""
     try:
-        # 获取资金费率
-        fr_url = "https://fapi.binance.com/fapi/v1/premiumIndex"
-        fr_res = requests.get(fr_url, params={"symbol": "BTCUSDT"}, timeout=5).json()
+        # OKX 获取资金费率 (BTC-USDT 永续)
+        fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
+        fr_res = requests.get(fr_url, timeout=5).json()
         
-        # 安全校验：判断返回值中是否确实包含预期的键，防止 IP 被墙导致的假数据
-        if "lastFundingRate" not in fr_res:
-            return {"error": True, "msg": f"API 限制或响应异常: {fr_res.get('msg', '未知错误')}", "active": False}
+        if fr_res.get("code") != "0":
+            return {"error": True, "msg": "OKX API 响应异常", "active": False}
             
-        funding_rate = float(fr_res["lastFundingRate"]) * 100 # 转为百分比
+        # 提取资金费率并转为百分比
+        funding_rate = float(fr_res['data'][0]['fundingRate']) * 100 
         
-        # 获取当前未平仓量(OI)
-        oi_url = "https://fapi.binance.com/fapi/v1/openInterest"
-        oi_res = requests.get(oi_url, params={"symbol": "BTCUSDT"}, timeout=5).json()
+        # OKX 获取当前未平仓量(OI)
+        oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
+        oi_res = requests.get(oi_url, timeout=5).json()
         
-        if "openInterest" not in oi_res:
+        if oi_res.get("code") != "0":
             return {"error": True, "msg": "获取 OI 数据异常", "active": False}
             
-        open_interest = float(oi_res["openInterest"])
+        # 提取未平仓量（以 USDT 计价）
+        open_interest = float(oi_res['data'][0]['oiCcy'])
         
-        # 简化判断：费率转正(> -0.005 且趋向正值视为企稳)
+        # 逻辑：费率转正(>= 0.0)视为企稳
         is_active = funding_rate >= 0.0
-        status = "资金费率转正 + OI企稳" if is_active else "费率依旧倒挂或极度悲观"
+        status = "资金费率转正 + OI企稳" if is_active else "费率倒挂或情绪悲观"
+        
         return {
             "funding_rate": f"{funding_rate:.4f}%",
             "oi": f"{open_interest:,.0f}",
@@ -103,26 +105,25 @@ def fetch_crypto_signals():
             "error": False
         }
     except Exception as e:
-        # 异常兜底逻辑
         return {"error": True, "msg": str(e), "active": False}
 
-import io # 需要在文件顶部确保引入了 io
+import cloudscraper # 需提前 pip install cloudscraper
 
 @st.cache_data(ttl=86400)
 def fetch_squeezemetrics_data():
-    """开关1 & 开关5：尝试获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
+    """开关1 & 开关5：使用 cloudscraper 获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
     url = "https://squeezemetrics.com/api/dix.csv"
     try:
-        # 1. 添加 User-Agent 伪装成真实的浏览器
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+        # 使用 cloudscraper 绕过 Cloudflare 5秒盾
+        scraper = cloudscraper.create_scraper(browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        })
         
-        # 2. 用 requests 获取数据，带上 headers
-        req = requests.get(url, headers=headers, timeout=10)
-        req.raise_for_status() # 如果被拦截(非200状态码)，直接抛出异常进入模拟数据
+        req = scraper.get(url, timeout=15)
+        req.raise_for_status() 
         
-        # 3. 将拿到的文本数据喂给 pandas
         df = pd.read_csv(io.StringIO(req.text))
         
         if not df.empty:
@@ -139,16 +140,13 @@ def fetch_squeezemetrics_data():
                 "dix_active": dix_active,
                 "gex_active": gex_active,
                 "error": False,
-                "df": df.tail(100), # 返回近100天供绘图
-                "is_mock": False    # 增加一个真实数据标记
+                "df": df.tail(100), 
+                "is_mock": False    
             }
     except Exception as e:
-        print(f"SqueezeMetrics 抓取失败: {e}") # 在终端打印真实报错原因，方便你排查
-        pass
-    
-    # ... 下面保留你原有的 Fallback (Mock) 逻辑 ...
-    
-    # 模拟Fallback数据以确保代码在无外部访问时正常渲染逻辑
+        print(f"SqueezeMetrics 抓取失败: {e}") 
+        
+    # 如果依旧失败，回退到降级模拟数据
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates,
