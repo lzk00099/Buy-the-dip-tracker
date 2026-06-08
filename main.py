@@ -312,10 +312,11 @@ for i, s in enumerate(switches):
         """, unsafe_allow_html=True)
         
         with st.expander(f"查看开关 {s['id']} 的深度解读与注意事项"):
-            st.markdown(f"**微观原理**:
-{s['interpretation_desc']}")
-            st.markdown(f"⚠️ **注意事项/盲区**:
-{s['note']}")
+            st.markdown(f"""**微观原理**:
+{s['interpretation_desc']}""")
+            
+            st.markdown(f"""⚠️ **注意事项/盲区**:
+{s['note']}""")
 
 # -----------------------------------------------------------------------------
 # 5. 底层数据可视化面板
