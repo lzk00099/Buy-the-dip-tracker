@@ -46,13 +46,23 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """开关2：获取VIX期限结构（双向逻辑判断）"""
+    """开关2：获取VIX期限结构（双向逻辑判断 - 已加入终极防 NaN 兜底）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
         hist = tickers.history(period='5d')
-        if not hist.empty:
-            vix = hist['Close']['^VIX'].iloc[-1]
-            vix3m = hist['Close']['^VIX3M'].iloc[-1]
+        if not hist.empty and 'Close' in hist.columns:
+            # 💡 容错核心1：先使用 ffill() 前向填充日内刷新时差带来的 NaN
+            close_data = hist['Close'].ffill()
+            
+            vix = close_data['^VIX'].iloc[-1]
+            vix3m = close_data['^VIX3M'].iloc[-1]
+            
+            # 💡 容错核心2：如果依然存在 NaN（比如刚开盘阶段），单独剥离空值取各自最新的有效收盘价
+            if np.isnan(vix):
+                vix = hist['Close']['^VIX'].dropna().iloc[-1]
+            if np.isnan(vix3m):
+                vix3m = hist['Close']['^VIX3M'].dropna().iloc[-1]
+                
             ratio = vix3m / vix
             
             bottom_active = ratio > 1.0  # 回到 Contango 视为抄底信号之一
@@ -70,7 +80,6 @@ def fetch_vix_data():
 def fetch_crypto_signals():
     """开关3：获取加密货币资产永续合约资金费率与OI趋势（双向逻辑判断）"""
     try:
-        # 💡 核心修复：对整个 try 逻辑块进行严格的 4 空格缩进，完美解决原代码 SyntaxError 报错
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
         if fr_res.get("code") != "0":
@@ -85,9 +94,8 @@ def fetch_crypto_signals():
             
         open_interest = float(oi_res['data'][0]['oiCcy'])
         
-        # 双向判定
         bottom_active = funding_rate >= 0.0  # 费率转正表示情绪企稳
-        top_active = funding_rate >= 0.035  # 单期费率超 0.035% (年化超 38%) 代表高位杠杆过载严重
+        top_active = funding_rate >= 0.035  # 单期费率超 0.035% 代表高位杠杆过载严重
         
         return {
             "funding_rate": f"{funding_rate:.4f}%", "oi": f"{open_interest:,.0f}",
@@ -132,11 +140,10 @@ def fetch_squeezemetrics_data():
                 if dix_val < 1.0: dix_val = dix_val * 100
                 gex_val = float(latest['gex'])
                 
-                # 双向逻辑判定
-                dix_bottom_active = dix_val >= 45.0  # 机构左层进场吸筹
-                dix_top_active = dix_val < 40.0      # 机构高位悄悄派发
-                gex_bottom_active = gex_val > 0      # 翻正右侧护盘
-                gex_top_active = gex_val < 0         # 翻负进入顺势砸盘区间
+                dix_bottom_active = dix_val >= 45.0
+                dix_top_active = dix_val < 40.0
+                gex_bottom_active = gex_val > 0
+                gex_top_active = gex_val < 0
                 
                 return {
                     "dix": round(dix_val, 2), "gex": int(gex_val),
@@ -147,7 +154,6 @@ def fetch_squeezemetrics_data():
         except Exception:
             pass
 
-    # 兜底机制
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates, 'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,
@@ -163,23 +169,25 @@ def fetch_squeezemetrics_data():
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """开关4 & 开关6：综合计算 CTA 动量偏离、全局相关性回落以及 SPY vs RSP 市场广度背离指标"""
+    """开关4 & 开关6：综合计算 CTA 动量偏离、全局相关性回落以及 SPY vs RSP 市场广度恶化背离指标"""
     try:
-        # 💡 一口气下载科技巨头、QQQ、SPY（市值加权标普）以及 RSP（等权重标普）
         tickers = ['QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'SPY', 'RSP']
         data = yf.download(tickers, period='6mo', progress=False)['Close']
         
+        # 💡 同步容错优化：对整体行情数据进行前向填充，防止日内更新滞后引起 nan
+        data = data.ffill()
+        
         # 1. 开关4：CTA 动量线计算
         qqq = data['QQQ']
-        ma200 = qqq.rolling(120).mean() # 采用半年均线代理提高灵敏度
+        ma200 = qqq.rolling(120).mean()
         latest_price = qqq.iloc[-1]
         latest_ma200 = ma200.iloc[-1] if not ma200.isna().all() else latest_price * 1.05
         dist_to_200 = (latest_price - latest_ma200) / latest_ma200
         
-        cta_bottom_active = dist_to_200 > -0.15  # 原有左侧枯竭判定
-        cta_top_active = dist_to_200 > 0.12     # 高位极端乖离，动量衰竭风险
+        cta_bottom_active = dist_to_200 > -0.15
+        cta_top_active = dist_to_200 > 0.12
         
-        # 2. 开关6核心 A：计算个股滚动相关性（完美保留原有逻辑）
+        # 2. 开关6核心 A：计算个股滚动相关性
         returns = data.pct_change().dropna()
         corrs = []
         for t in ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL']:
@@ -188,15 +196,13 @@ def calculate_quant_and_breadth_signals():
                 corrs.append(c)
         avg_corr = np.mean(corrs) if corrs else 0.85
         
-        corr_bottom_active = avg_corr < 0.80 # 核心抄底判定：相关性高位解耦，泥沙俱下无脑砸盘结束
+        corr_bottom_active = avg_corr < 0.80
         
-        # 3. 开关6核心 B：计算 SPY vs RSP 市场广度恶化背离（核心逃顶引入）
+        # 3. 开关6核心 B：计算 SPY vs RSP 市场广度恶化背离
         spy_rsp_ratio = data['SPY'] / data['RSP']
         latest_ratio = spy_rsp_ratio.iloc[-1]
-        # 计算过去 3 个月（约60个交易日）的比率高点
         ratio_max_3mo = spy_rsp_ratio.rolling(60).max().iloc[-1]
         
-        # 如果当前比率处于3个月内的最高点附近（>=最高点的99.5%），意味着极少数巨头死扛大盘，广度发生极度恶化
         breadth_top_active = latest_ratio >= (ratio_max_3mo * 0.995)
         
         return {
@@ -344,7 +350,6 @@ cols = st.columns(3)
 
 for i, s in enumerate(switches):
     with cols[i % 3]:
-        # 判断当前框的外观卡片样式（哪个信号被激活，框就变对应的颜色）
         if s["top_active"]:
             box_class = "status-top-active"
             badge_html = f"<span class='badge-top'>🚨 见顶风险触发</span>"
