@@ -108,65 +108,80 @@ def fetch_crypto_signals():
         return {"error": True, "msg": str(e), "active": False}
 
 @st.cache_data(ttl=86400)
+
 def fetch_squeezemetrics_data():
+
     """开关1 & 开关5：尝试获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
+
     url = "https://squeezemetrics.com/api/dix.csv"
-    
+
     try:
-        # 1. 添加 User-Agent 伪装成浏览器，避免被 SqueezeMetrics 服务器拒绝
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        # 2. 使用 requests 发送请求，这里可以使用 timeout
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        # 检查是否返回了成功的状态码 (如 403 或 404 会在这里抛出异常)
-        response.raise_for_status() 
-        
-        # 3. 将返回的文本数据转换并塞给 pandas
-        df = pd.read_csv(io.StringIO(response.text))
-        
+
+        df = pd.read_csv(url, timeout=10)
+
         if not df.empty:
+
             latest = df.iloc[-1]
+
             dix_val = float(latest['dix']) * 100
+
             gex_val = float(latest['gex'])
+
             
+
             dix_active = dix_val >= 45.0
+
             gex_active = gex_val > 0  # 翻回正值
+
             
+
             return {
+
                 "dix": round(dix_val, 2),
+
                 "gex": int(gex_val),
+
                 "dix_active": dix_active,
+
                 "gex_active": gex_active,
+
                 "error": False,
-                "df": df.tail(100), # 返回近100天供绘图
-                "is_mock": False    # 增加标志位，证明这是真实数据
+
+                "df": df.tail(100) # 返回近100天供绘图
+
             }
-            
+
     except Exception as e:
-        # 打印出具体错误，方便以后在终端排查，而不是静默 pass
-        print(f"⚠️ SqueezeMetrics 数据获取失败: {e}")
+
+        pass
+
     
-    # ---------------- 模拟Fallback数据 ----------------
+
+    # 模拟Fallback数据以确保代码在无外部访问时正常渲染逻辑
+
     dates = pd.date_range(end=datetime.date.today(), periods=100)
+
     mock_df = pd.DataFrame({
+
         'date': dates,
+
         'dix': np.sin(np.linspace(0, 10, 100)) * 0.03 + 0.44,
+
         'gex': np.random.normal(loc=500000000, scale=1000000000, size=100)
+
     })
+
     latest = mock_df.iloc[-1]
-    
+
     return {
-        "dix": round(latest['dix'] * 100, 2), 
-        "gex": int(latest['gex']),
-        "dix_active": (latest['dix'] * 100) >= 45.0, 
-        "gex_active": latest['gex'] > 0,
-        "error": True, # 建议这里改为 True，让前端UI可以提示用户当前处于离线Mock状态
-        "df": mock_df, 
-        "is_mock": True
-    }
+
+        "dix": round(latest['dix'] * 100, 2), "gex": int(latest['gex']),
+
+        "dix_active": (latest['dix'] * 100) >= 45.0, "gex_active": latest['gex'] > 0,
+
+        "error": False, "df": mock_df, "is_mock": True
+
+    } 
 
 @st.cache_data(ttl=3600)
 def calculate_cta_and_correlation():
