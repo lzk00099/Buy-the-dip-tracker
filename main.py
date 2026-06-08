@@ -6,7 +6,6 @@ import requests
 import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import os
 
 # -----------------------------------------------------------------------------
 # 1. 页面基本配置与全局样式
@@ -107,55 +106,43 @@ def fetch_crypto_signals():
     except Exception as e:
         return {"error": True, "msg": str(e), "active": False}
 
-@st.cache_data(ttl=1800)  # 前端依然保留轻量缓存以优化性能
+@st.cache_data(ttl=86400)
 def fetch_squeezemetrics_data():
-    """
-    【架构升级：去爬虫化纯净版】
-    不再直接请求外部网站，100% 免疫 Cloudflare 封锁。
-    直接读取由 GitHub Actions 每日自动同步落地的本地 dix.csv。
-    """
-    file_path = "dix.csv"
-    
-    # 1. 检查本地（或者 GitHub 文件夹中）是否存在该数据
-    if os.path.exists(file_path):
-        try:
-            df = pd.read_csv(file_path)
-            if not df.empty:
-                # 提取最后一日的真实数据
-                latest = df.iloc[-1]
-                dix_val = float(latest['dix']) * 100
-                gex_val = float(latest['gex'])
-                
-                # 如果 csv 里日期列叫 date，提取出来展示在看板上
-                scraped_date = str(latest['date']) if 'date' in latest else "已同步"
-                
-                return {
-                    "dix": round(dix_val, 2),
-                    "gex": int(gex_val),
-                    "dix_active": dix_val >= 45.0,
-                    "gex_active": gex_val > 0,
-                    "error": False,
-                    "df": df.tail(100),       # 取近100天喂给 Plotly 图表
-                    "is_mock": False,
-                    "scraped_date": scraped_date
-                }
-        except Exception as e:
-            st.error(f"本地 CSV 解析异常: {e}")
+    """开关1 & 开关5：尝试获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
+    url = "https://squeezemetrics.com/api/dix.csv"
+    try:
+        df = pd.read_csv(url, timeout=10)
+        if not df.empty:
+            latest = df.iloc[-1]
+            dix_val = float(latest['dix']) * 100
+            gex_val = float(latest['gex'])
             
-    # 2. 🛡️ 极端兜底防御（例如首次部署仓库里还没有文件时，防止前端空转闪退）
-    import datetime
-    import numpy as np
+            dix_active = dix_val >= 45.0
+            gex_active = gex_val > 0  # 翻回正值
+            
+            return {
+                "dix": round(dix_val, 2),
+                "gex": int(gex_val),
+                "dix_active": dix_active,
+                "gex_active": gex_active,
+                "error": False,
+                "df": df.tail(100) # 返回近100天供绘图
+            }
+    except Exception as e:
+        pass
+    
+    # 模拟Fallback数据以确保代码在无外部访问时正常渲染逻辑
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates,
         'dix': np.sin(np.linspace(0, 10, 100)) * 0.03 + 0.44,
-        'gex': np.random.normal(loc=1500000000, scale=500000000, size=100)
+        'gex': np.random.normal(loc=500000000, scale=1000000000, size=100)
     })
+    latest = mock_df.iloc[-1]
     return {
-        "dix": 42.5, "gex": -120000000,
-        "dix_active": False, "gex_active": False,
-        "error": False, "df": mock_df, "is_mock": True,
-        "scraped_date": "等待自动工作流首次执行..."
+        "dix": round(latest['dix'] * 100, 2), "gex": int(latest['gex']),
+        "dix_active": (latest['dix'] * 100) >= 45.0, "gex_active": latest['gex'] > 0,
+        "error": False, "df": mock_df, "is_mock": True
     }
 
 @st.cache_data(ttl=3600)
