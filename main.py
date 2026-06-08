@@ -75,12 +75,21 @@ def fetch_crypto_signals():
         # 获取资金费率
         fr_url = "https://fapi.binance.com/fapi/v1/premiumIndex"
         fr_res = requests.get(fr_url, params={"symbol": "BTCUSDT"}, timeout=5).json()
-        funding_rate = float(fr_res.get("lastFundingRate", 0)) * 100 # 转为百分比
+        
+        # 安全校验：判断返回值中是否确实包含预期的键，防止 IP 被墙导致的假数据
+        if "lastFundingRate" not in fr_res:
+            return {"error": True, "msg": f"API 限制或响应异常: {fr_res.get('msg', '未知错误')}", "active": False}
+            
+        funding_rate = float(fr_res["lastFundingRate"]) * 100 # 转为百分比
         
         # 获取当前未平仓量(OI)
         oi_url = "https://fapi.binance.com/fapi/v1/openInterest"
         oi_res = requests.get(oi_url, params={"symbol": "BTCUSDT"}, timeout=5).json()
-        open_interest = float(oi_res.get("openInterest", 0))
+        
+        if "openInterest" not in oi_res:
+            return {"error": True, "msg": "获取 OI 数据异常", "active": False}
+            
+        open_interest = float(oi_res["openInterest"])
         
         # 简化判断：费率转正(> -0.005 且趋向正值视为企稳)
         is_active = funding_rate >= 0.0
