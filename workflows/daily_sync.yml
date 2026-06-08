@@ -1,0 +1,34 @@
+name: Sentinel Daily DIX Sync
+
+on:
+  schedule:
+    # 每天周一至周五的 UTC 23:45 触发（对应美东盘后数据刷新时间）
+    - cron: '45 23 * * 1-5'
+  workflow_dispatch: # 允许你在 GitHub 页面上手动点击按钮立即测试触发
+
+jobs:
+  build-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 1. 检出本地仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 初始化 Python 环境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: 3. 安装解密所需依赖
+      run: |
+        pip install cloudscraper requests
+
+    - name: 4. 驱动爬虫执行下载
+      run: python sync_dix.py
+
+    - name: 5. 自动提交变动的 CSV 文件回 GitHub 文件夹
+      run: |
+        git config --local user.email "bot@sentinel.quant"
+        git config --local user.name "Sentinel-Data-Bot"
+        git add dix.csv
+        # 检查文件是否有实质更新，有则提交并推送，无则静默跳过
+        git diff --quiet && git diff --staged --quiet || (git commit -m "📈 自动更新暗池数据流 (GEX/DIX)" && git push)
