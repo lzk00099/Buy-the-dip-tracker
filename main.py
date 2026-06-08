@@ -126,7 +126,7 @@ def fetch_squeezemetrics_data():
             
     if should_download:
         try:
-            # 核心改进：添加浏览器 Headers 绕过 SqueezeMetrics 对代码直接抓取的反爬限制
+            # 注入浏览器 Headers 绕过 SqueezeMetrics 反爬限制
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -152,7 +152,7 @@ def fetch_squeezemetrics_data():
                 gex_val = float(latest['gex'])
                 
                 dix_active = dix_val >= 45.0
-                gex_active = gex_val > 0  # 翻回正值
+                gex_active = gex_val > 0
                 
                 return {
                     "dix": round(dix_val, 2),
@@ -166,7 +166,7 @@ def fetch_squeezemetrics_data():
         except Exception as e:
             st.sidebar.error(f"❌ 解析本地缓存文件失败: {e}")
 
-    # Fallback 兜底机制：若无任何缓存且下载失败，则使用模拟数据以保证 UI 正常渲染
+    # Fallback 兜底机制
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates,
@@ -315,7 +315,7 @@ elif active_count >= 2:
     action_plan = "**应对措施**：市场处于左侧探底或超跌反弹的锯齿形走势中。总开关若未转正，坚决不加大仓位。继续保持高现金流或对冲头寸。密切关注加密资金费率和暗池DIX是否率先异动，对个股诊断模型输入的标的采取‘严格分批、到价才买’的防守策略。"
 else:
     st.info(f"❄️ 【风险未出清 / 顺势防御：逃顶或空仓状态】(当前达成信号: {active_count}/6)")
-    action_plan = "**应对措施**：微观见底信号严重不足。市场仍由做市商Short Gamma砸盘压力或CTA持续清算主导。切勿盲目猜底。严格执行限仓或分批定投防御性资产，对任何反弹持怀疑态度，警惕杠杆ETF（如TQQQ）的剧烈损耗，保持 Sentinel Bot 的严格风控止损线。"
+    action_plan = "**应对措施**：微观见底信号严重不足。市场仍由做市商Short Gamma砸盘压力或CTA持续清算主导。切勿盲目猜底。严格执行限仓或分批定投防御性资产，对任何反弹持怀疑态度，警惕杠杆ETF（如TQQQ）的剧烈损耗，保持 Sentinel Bot 的严格风控止损线格式。"
 
 st.info(action_plan)
 
@@ -342,10 +342,8 @@ for i, s in enumerate(switches):
         """, unsafe_allow_html=True)
         
         with st.expander(f"查看开关 {s['id']} 的深度解读与注意事项"):
-            st.markdown(f"""**微观原理**:
-{s['interpretation_desc']}""")
-            st.markdown(f"""⚠️ **注意事项/盲区**:
-{s['note']}""")
+            st.markdown(f"""**微观原理**:\n{s['interpretation_desc']}""")
+            st.markdown(f"""⚠️ **注意事项/盲区**:\n{s['note']}""")
 
 st.markdown("### 📈 微观结构基础数据图表 (以DIX / GEX代理为例)")
 if not sm_data["error"]:
@@ -379,3 +377,4 @@ st.markdown("""
 1. **反爬解决方案**：已内置24小时本地 CSV 文件持久化缓存体系，并集成标准浏览器 `User-Agent` 伪装请求头，彻底解决由于 pandas/Streamlit 默认指纹引发的 `403 Forbidden` 或超时拦截问题。
 2. **多层防线设计**：如果官网接口彻底关停或网络受限，看板将自动检索历史本地 `dix_cache.csv` 记录；若本地无记录则进入智能 Mock 算法进行 UI 健壮性自愈，避免系统崩溃。
 3. **架构进阶建议**：如果在 Streamlit Cloud 分布式生产环境中部署，由于容器磁盘具有易失性（Ephemeral Space），推荐配合 GitHub Actions 脚本定时爬取同步（详见答复指南）。
+""")
