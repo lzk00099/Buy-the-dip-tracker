@@ -7,6 +7,7 @@ import datetime
 import io
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import cloudscraper
 
 # -----------------------------------------------------------------------------
 # 1. 页面基本配置与全局样式
@@ -113,19 +114,20 @@ def fetch_squeezemetrics_data():
     url = "https://squeezemetrics.com/api/dix.csv"
     
     try:
-        # 1. 构造标准的浏览器请求头，防止被 SqueezeMetrics 服务器当作爬虫拒绝
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-        }
+        # 1. 实例化 cloudscraper，完美模拟真实 Windows/Chrome 浏览器的底层特征
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
         
-        # 2. 使用 requests 下载数据（支持 timeout）
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        # 如果返回了 403、404 或 500 等错误状态码，立刻抛出异常进入 fallback 流程
+        # 2. 发起请求
+        response = scraper.get(url, timeout=15)
         response.raise_for_status() 
         
-        # 3. 将下载的文本数据交给 pandas 解析
+        # 3. 解析真实数据
         df = pd.read_csv(io.StringIO(response.text))
         
         if not df.empty:
@@ -133,25 +135,22 @@ def fetch_squeezemetrics_data():
             dix_val = float(latest['dix']) * 100
             gex_val = float(latest['gex'])
             
-            dix_active = dix_val >= 45.0
-            gex_active = gex_val > 0  # 翻回正值
-            
             return {
                 "dix": round(dix_val, 2),
                 "gex": int(gex_val),
-                "dix_active": dix_active,
-                "gex_active": gex_active,
-                "error": False,        # 正常获取数据，无错误
-                "df": df.tail(100),    # 返回近100天供绘图
-                "is_mock": False
+                "dix_active": dix_val >= 45.0,
+                "gex_active": gex_val > 0,
+                "error": False,        # 正常获取，图表通行
+                "df": df.tail(100),
+                "is_mock": False       # 成功拿到真实数据！
             }
             
     except Exception as e:
-        # 仅在后台打印错误原因，不干扰前端渲染
-        print(f"⚠️ SqueezeMetrics 真实数据获取失败（将启用备用数据）: {e}")
+        # 如果连 cloudscraper 都被拦截，通常是因为服务器宕机或IP被彻底封锁
+        print(f"⚠️ 真实数据获取失败 (Cloudflare拦截或网络异常): {e}")
     
     # ---------------- 模拟 Fallback 数据 ----------------
-    # 核心修复：保持 "error": False，确保断网或接口挂掉时，下游的微观结构图表也能强行渲染出来
+    # 依然保持 error 为 False，确保下游图表100%可以渲染出来
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates,
@@ -165,9 +164,9 @@ def fetch_squeezemetrics_data():
         "gex": int(latest['gex']),
         "dix_active": (latest['dix'] * 100) >= 45.0, 
         "gex_active": latest['gex'] > 0,
-        "error": False,        # 极其重要：必须为 False，否则你的主程序图表组件会拒绝渲染
+        "error": False,        # 核心：必须为 False，保证图表组件运行
         "df": mock_df, 
-        "is_mock": True        # 用这个标志位供你在别的地方做提示（可选）
+        "is_mock": True        # 提示当前为备用数据
     }
 
 @st.cache_data(ttl=3600)
