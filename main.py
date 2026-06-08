@@ -6,8 +6,7 @@ import requests
 import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import cloudscraper
-from bs4 import BeautifulSoup
+import os
 
 # -----------------------------------------------------------------------------
 # 1. 页面基本配置与全局样式
@@ -108,78 +107,44 @@ def fetch_crypto_signals():
     except Exception as e:
         return {"error": True, "msg": str(e), "active": False}
 
-@st.cache_data(ttl=3600)  # 每小时缓存一次，避免高频请求触发黑名单
+@st.cache_data(ttl=1800)  # 前端依然保留轻量缓存以优化性能
 def fetch_squeezemetrics_data():
     """
-    【网页直接抓取版】
-    直接解析 https://squeezemetrics.com/monitor/dix 纯文本，
-    利用正则表达式精准捕获最新一天的 DIX% 和 GEX 数字。
+    【架构升级：去爬虫化纯净版】
+    不再直接请求外部网站，100% 免疫 Cloudflare 封锁。
+    直接读取由 GitHub Actions 每日自动同步落地的本地 dix.csv。
     """
-    url = "https://squeezemetrics.com/monitor/dix"
+    file_path = "dix.csv"
     
-    try:
-        # 1. 实例化高级爬虫，完美模拟真实 Windows/Chrome 浏览器特征
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
-        )
-        
-        # 2. 发起网页请求并提取纯文本
-        response = scraper.get(url, timeout=15)
-        response.raise_for_status() 
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        page_text = soup.get_text(separator=" ")  # 转化为带空格分隔的纯文本字符串
-        
-        # 3. 正则表达式精准匹配数据流特征：
-        # 匹配规则：[数字.数字]% + [空格] + [数字.数字] + [空格] + [带逗号的正负数字] + [空格] + [日期]
-        # 范例：43.2% 7383.74 3,784,922,727 05 Jun '26
-        pattern = r"(\d+\.\d+)%\s+([\d.]+)\s+([\d,.-]+)\s+(\d{2}\s+[A-Za-z]{3}\s+'\d{2})"
-        match = re.search(pattern, page_text)
-        
-        if match:
-            dix_str = match.group(1)       # 提取出的 DIX 字符串 (如 "43.2")
-            sp_price_str = match.group(2)  # S&P 500 价格 (如 "7383.74")
-            gex_str = match.group(3)       # 提取出的 GEX 字符串 (如 "3,784,922,727")
-            date_str = match.group(4)      # 抓取到的官方最新数据日期 (如 "05 Jun '26")
+    # 1. 检查本地（或者 GitHub 文件夹中）是否存在该数据
+    if os.path.exists(file_path):
+        try:
+            df = pd.read_csv(file_path)
+            if not df.empty:
+                # 提取最后一日的真实数据
+                latest = df.iloc[-1]
+                dix_val = float(latest['dix']) * 100
+                gex_val = float(latest['gex'])
+                
+                # 如果 csv 里日期列叫 date，提取出来展示在看板上
+                scraped_date = str(latest['date']) if 'date' in latest else "已同步"
+                
+                return {
+                    "dix": round(dix_val, 2),
+                    "gex": int(gex_val),
+                    "dix_active": dix_val >= 45.0,
+                    "gex_active": gex_val > 0,
+                    "error": False,
+                    "df": df.tail(100),       # 取近100天喂给 Plotly 图表
+                    "is_mock": False,
+                    "scraped_date": scraped_date
+                }
+        except Exception as e:
+            st.error(f"本地 CSV 解析异常: {e}")
             
-            # 4. 数据类型清洗与转换
-            dix_val = float(dix_str)
-            gex_clean = gex_str.replace(",", "")  # 剔除千分位逗号
-            gex_val = int(float(gex_clean))       # 转换为标准长整型金额
-            
-            # 5. 构建供下游图表（Plotly）渲染用的 DataFrame
-            # 因为网页只暴露了最新一天的数字，我们用算法生成前99天的平滑动量曲线，并将最后一天替换为明牌真实数据
-            dates = pd.date_range(end=datetime.date.today(), periods=100)
-            df = pd.DataFrame({
-                'date': dates,
-                'dix': np.sin(np.linspace(0, 10, 100)) * 0.02 + 0.43, # 模拟中枢
-                'gex': np.random.normal(loc=gex_val, scale=abs(gex_val)*0.08, size=100)
-            })
-            # 强行修正最后一日为网络抓取的绝对真实值
-            df.iloc[-1, df.columns.get_loc('dix')] = dix_val / 100
-            df.iloc[-1, df.columns.get_loc('gex')] = gex_val
-            
-            return {
-                "dix": round(dix_val, 2),
-                "gex": gex_val,
-                "dix_active": dix_val >= 45.0,
-                "gex_active": gex_val > 0,
-                "error": False,
-                "df": df.tail(100),
-                "is_mock": False,
-                "scraped_date": date_str  # 顺带把官方日期传给前端展示
-            }
-        else:
-            raise ValueError("成功获取网页，但未在文本中匹配到标准数据特征格式 (XX.X% SPX GEX Date)")
-            
-    except Exception as e:
-        print(f"⚠️ SqueezeMetrics 网页解析失败: {e}")
-        
-    # ---------------- 🛡️ 极端异常安全防线 (保持系统永远不崩溃) ----------------
+    # 2. 🛡️ 极端兜底防御（例如首次部署仓库里还没有文件时，防止前端空转闪退）
+    import datetime
+    import numpy as np
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates,
@@ -187,14 +152,10 @@ def fetch_squeezemetrics_data():
         'gex': np.random.normal(loc=1500000000, scale=500000000, size=100)
     })
     return {
-        "dix": 43.2, 
-        "gex": 3784922727,
-        "dix_active": False, 
-        "gex_active": True,
-        "error": False, 
-        "df": mock_df, 
-        "is_mock": True,
-        "scraped_date": "网络阻塞 (采用备用静态数据)"
+        "dix": 42.5, "gex": -120000000,
+        "dix_active": False, "gex_active": False,
+        "error": False, "df": mock_df, "is_mock": True,
+        "scraped_date": "等待自动工作流首次执行..."
     }
 
 @st.cache_data(ttl=3600)
