@@ -109,7 +109,7 @@ def fetch_squeezemetrics_data():
     """开关1 & 开关5：获取 SqueezeMetrics 的 DIX 和 GEX 数据（带24小时本地缓存与双向逻辑）"""
     url = "https://squeezemetrics.com/monitor/static/DIX.csv"
     cache_file = "dix_cache.csv"
-    cooldown_seconds = 24 * 60 * 60
+    cooldown_seconds = 8 * 60 * 60
     should_download = True
     
     if os.path.exists(cache_file):
