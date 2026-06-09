@@ -169,59 +169,88 @@ def fetch_squeezemetrics_data():
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """开关4 & 开关6：综合计算 CTA 动量偏离、全局相关性回落以及 SPY vs RSP 市场广度恶化背离指标"""
+    """
+    升级版开关4 & 开关6：
+    1. 整合 CBOE 官方隐含相关性 (^COR1M) 与 离散度指数 (^DSPX) 替代原生实现相关性
+    2. 综合 QQQ, SPY, IWM 建立多时区趋势矩阵，精准模拟系统化 CTA 资金的仓位极值
+    """
     try:
-        tickers = ['QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'SPY', 'RSP']
-        data = yf.download(tickers, period='6mo', progress=False)['Close']
+        # 1. 抓取大盘核心资产及 CBOE 官方微观结构指数
+        # 💡 注：^COR1M (CBOE 1-Month Implied Correlation Index), ^DSPX (CBOE S&P 500 Dispersion Index)
+        tickers = ['QQQ', 'SPY', 'IWM', '^COR1M', '^DSPX', 'RSP']
+        data = yf.download(tickers, period='1y', progress=False)['Close']
+        data = data.ffill()  # 深度前向填充，对冲日内刷新时序错位
         
-        # 💡 同步容错优化：对整体行情数据进行前向填充，防止日内更新滞后引起 nan
-        data = data.ffill()
+        latest = data.iloc[-1]
         
-        # 1. 开关4：CTA 动量线计算
-        qqq = data['QQQ']
-        ma200 = qqq.rolling(120).mean()
-        latest_price = qqq.iloc[-1]
-        latest_ma200 = ma200.iloc[-1] if not ma200.isna().all() else latest_price * 1.05
-        dist_to_200 = (latest_price - latest_ma200) / latest_ma200
+        # ---------------------------------------------------------------------
+        # 【核心升级】开关4：CTA 趋势矩阵系统化建模 (综合 QQQ, IWM, SPY)
+        # ---------------------------------------------------------------------
+        cta_signals = {}
+        for idx_name in ['QQQ', 'SPY', 'IWM']:
+            price = data[idx_name]
+            ma20 = price.rolling(20).mean()
+            ma50 = price.rolling(50).mean()
+            ma200 = price.rolling(200).mean()
+            
+            # 计算当前价格对短/中/长均线的偏离度得分
+            score = 0
+            if price.iloc[-1] > ma20.iloc[-1]: score += 1
+            if price.iloc[-1] > ma50.iloc[-1]: score += 1
+            if price.iloc[-1] > ma200.iloc[-1]: score += 1
+            cta_signals[idx_name] = {
+                'score': score, # 满分3分代表绝对多头，0分代表绝对空头
+                'dist_200': (price.iloc[-1] - ma200.iloc[-1]) / ma200.iloc[-1]
+            }
         
-        cta_bottom_active = dist_to_200 > -0.15
-        cta_top_active = dist_to_200 > 0.12
+        # 综合三大股指评估 CTA 总仓位状态
+        avg_dist_200 = np.mean([cta_signals[k]['dist_200'] for k in cta_signals])
+        total_trend_score = sum([cta_signals[k]['score'] for k in cta_signals]) # 总分 0-9
         
-        # 2. 开关6核心 A：计算个股滚动相关性
-        returns = data.pct_change().dropna()
-        corrs = []
-        for t in ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL']:
-            if t in returns.columns:
-                c = returns['QQQ'].rolling(20).corr(returns[t]).iloc[-1]
-                corrs.append(c)
-        avg_corr = np.mean(corrs) if corrs else 0.85
+        # 筑底激活条件：CTA全线彻底转空（总分<=1）且处于深度超跌区间（偏离200日线超过-10%），说明清算抛压耗尽
+        cta_bottom_active = (total_trend_score <= 1) and (avg_dist_200 < -0.10)
+        # 逃顶激活条件：CTA多头仓位打满（总分>=8）且过度超买（平均偏离200日线超过12%），边际买力衰竭
+        cta_top_active = (total_trend_score >= 8) and (avg_dist_200 > 0.12)
         
-        corr_bottom_active = avg_corr < 0.80
+        # ---------------------------------------------------------------------
+        # 【核心升级】开关6：CBOE 官方期权隐含指标微观解耦
+        # ---------------------------------------------------------------------
+        current_cor = latest.get('^COR1M', np.nan)
+        current_dsp = latest.get('^DSPX', np.nan)
         
-        # 3. 开关6核心 B：计算 SPY vs RSP 市场广度恶化背离
-        spy_rsp_ratio = data['SPY'] / data['RSP']
-        latest_ratio = spy_rsp_ratio.iloc[-1]
-        ratio_max_3mo = spy_rsp_ratio.rolling(60).max().iloc[-1]
+        # 计算历史滚动分位数，以确立绝对极值点
+        cor_90th = data['^COR1M'].rolling(120).quantile(0.90).iloc[-1]
+        cor_10th = data['^COR1M'].rolling(120).quantile(0.10).iloc[-1]
+        dsp_90th = data['^DSPX'].rolling(120).quantile(0.90).iloc[-1]
         
-        breadth_top_active = latest_ratio >= (ratio_max_3mo * 0.995)
+        # 筑底激活条件：官方隐含相关性飚升至 90% 分位数以上（说明市场发生无差别踩踏，进入左侧黄金筑底期）
+        corr_bottom_active = current_cor >= cor_90th if not np.isnan(current_cor) else False
+        
+        # 逃顶激活条件：相关性极低（处于10%分位数以下，极度自满），但官方离散度指数爆表（>=90%分位数）
+        # 这意味着市场表象平稳，但个股底层结构已经极度分裂，主力在死拉巨头派发中小盘
+        breadth_top_active = (current_cor <= cor_10th) and (current_dsp >= dsp_90th) if (not np.isnan(current_cor) and not np.isnan(current_dsp)) else False
+        
+        # 补充：保留原有的 SPY/RSP 广度跟踪辅助参考
+        spy_rsp_ratio = latest['SPY'] / latest['RSP']
         
         return {
-            "dist_to_200": f"{dist_to_200*100:.2f}%",
-            "avg_corr": round(avg_corr, 2),
-            "spy_rsp_ratio": round(latest_ratio, 4),
+            "error": False,
+            "cta_score": f"{total_trend_score}/9 (均线偏离: {avg_dist_200*100:.2f}%)",
+            "cboe_corr": round(current_cor, 2) if not np.isnan(current_cor) else "暂无数据",
+            "cboe_disp": round(current_dsp, 2) if not np.isnan(current_dsp) else "暂无数据",
+            "spy_rsp_ratio": round(spy_rsp_ratio, 4),
             "cta_bottom_active": cta_bottom_active,
             "cta_top_active": cta_top_active,
             "corr_bottom_active": corr_bottom_active,
-            "breadth_top_active": breadth_top_active,
-            "error": False
+            "breadth_top_active": breadth_top_active
         }
+        
     except Exception as e:
         return {
             "error": True, "msg": str(e), 
             "cta_bottom_active": False, "cta_top_active": False,
             "corr_bottom_active": False, "breadth_top_active": False
         }
-
 # -----------------------------------------------------------------------------
 # 3. 双向风控业务核心逻辑组装
 # -----------------------------------------------------------------------------
@@ -263,13 +292,13 @@ switches = [
     },
     {
         "id": 4,
-        "name": "CTA 投行系统化动量策略",
+        "name": "CTA 系统化全局动量矩阵 (SPY/QQQ/IWM 共振)",
         "bottom_active": quant_data["cta_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["cta_top_active"] if not quant_data["error"] else False,
-        "value": f"QQQ偏离均线: {quant_data.get('dist_to_200', 'N/A')}",
-        "source": "投行量化动量模型代理",
-        "desc_bottom": "价格深度偏离均线后企稳，意味着量化趋势基金(CTA)无脑清算的几百亿美金抛压基本耗尽。",
-        "desc_top": "价格偏离均线超12%以上。无脑买入的边际多头力量加满，多头购买力阶段性衰竭，易获利回吐。",
+        "value": f"CTA 矩阵总分: {quant_data.get('cta_score', 'N/A')}",
+        "source": "Sentinel 多时区跨资产动量演算矩阵",
+        "desc_bottom": "三大股指均线全面跌破且极度超跌。趋势跟踪基金（CTA）空头仓位打满，无脑砸盘的几百亿美金系统性抛压全面耗尽。",
+        "desc_top": "三大股指均线极度超买，总分触顶。无脑买入的边际系统性多头力量全部满仓，市场缺乏边际买家，易引发多头剧烈踩踏。",
     },
     {
         "id": 5,
@@ -283,13 +312,13 @@ switches = [
     },
     {
         "id": 6,
-        "name": "全局相关性见顶与广度恶化背离",
+        "name": "CBOE 官方隐含相关性与期权离散度 (VIX底层死穴)",
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
-        "value": f"滚动相关性: {quant_data.get('avg_corr', 'N/A')} | SPY/RSP 比率: {quant_data.get('spy_rsp_ratio', 'N/A')}",
-        "source": "CBOE DSPX 离散度算法 & 标普等权重背离追踪",
-        "desc_bottom": "全局相关性从0.9以上的高位见顶回落。无理智的泥沙俱下抛售结束，聪明选股资金重新入场。",
-        "desc_top": "SPY/RSP比率处于数月高点。大盘指数由于极个别超级巨头（如NVDA）被死扛而虚假繁荣，其余70%成分股已暗中破位，属于经典派发期顶背离。",
+        "value": f"隐含相关性(^COR1M): {quant_data.get('cboe_corr', 'N/A')} | 离散度指数(^DSPX): {quant_data.get('cboe_disp', 'N/A')}",
+        "source": "CBOE (芝加哥期权交易所官方衍生品指标)",
+        "desc_bottom": "官方隐含相关性指标冲向历史高位（>90%分位数）。市场进入情绪高潮带来的‘泥沙俱下’无差别抛售期，完美的左侧大底标签。",
+        "desc_top": "相关性极其低迷但官方离散度指数爆发。大盘指数由于极个别超级巨头被期权逼空死扛而虚假繁荣，其余成分股已暗中破位，属于经典高位结构性派发期。",
     }
 ]
 
