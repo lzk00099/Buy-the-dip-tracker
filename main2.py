@@ -451,31 +451,33 @@ for i, s in enumerate(switches):
         """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. 图表可视化与纳指引擎（已升级：动态收盘位 + 连续走势曲线）
+# 5. 图表可视化与纳指引擎（🔥 修复 MultiIndex 转换报错版）
 # -----------------------------------------------------------------------------
 st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
 
 @st.cache_data(ttl=1800)
 def fetch_ndx_chart_data():
-    return yf.download('^NDX', period='3mo', progress=False)
+    # 💡 核心修复：单资产下载改用 history()。它返回标准的单层列名，彻底根除 float() 转换报错
+    df = yf.Ticker('^NDX').history(period='3mo')
+    return df
 
 ndx_data = fetch_ndx_chart_data()
 if not ndx_data.empty:
     fig_ndx = go.Figure()
     
-    # 获取实时最新收盘价，动态替代原有的静态 28830 线位
+    # 此时 ndx_data['Close'] 是标准的 1D Series，iloc[-1] 是纯数值，float() 可以完美无误执行
     latest_ndx_close = float(ndx_data['Close'].iloc[-1])
     
-    # 💡 升级1：将原 K 线图替换为平滑的【纳指实际收盘走势曲线】
+    # 将原 K 线图替换为平滑的【纳指实际收盘走势曲线】
     fig_ndx.add_trace(go.Scatter(
         x=ndx_data.index, 
         y=ndx_data['Close'], 
         mode='lines', 
         name='NDX 实际走势曲线', 
-        line=dict(color='#2980b9', width=2.5) # 使用经典的量化深蓝色曲线
+        line=dict(color='#2980b9', width=2.5) # 量化深蓝走势线
     ))
     
-    # 💡 升级2：动态收盘参考位（用实时提取的最新价替代固定死板的 28,830）
+    # 动态收盘参考位（实时提取最新收盘价）
     fig_ndx.add_hline(
         y=latest_ndx_close, 
         line_dash="solid", 
@@ -484,7 +486,7 @@ if not ndx_data.empty:
         annotation_position="top right"
     )
     
-    # 保留原有的风控预测边界线（如果需要，未来也可以改为依据 ATR 或标准差动态计算）
+    # 风控预测边界支撑线
     fig_ndx.add_hline(y=28500, line_dash="dash", line_color="#e74c3c", annotation_text="CTA 二次抛售加速位 (28,500)", annotation_position="bottom right")
     fig_ndx.add_hline(y=26500, line_dash="dash", line_color="#c0392b", annotation_text="极端下影/二次冲洗 (26,500)", annotation_position="bottom right")
     
@@ -498,7 +500,7 @@ if not ndx_data.empty:
         title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演 (实时数据驱动)",
         template="plotly_white",
         yaxis_title="NDX Index Points",
-        xaxis_rangeslider_visible=False, # 曲线模式下关闭下方复杂的滑块，保持看板清爽
+        xaxis_rangeslider_visible=False,
         height=500,
         margin=dict(l=20, r=20, t=40, b=20)
     )
