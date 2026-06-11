@@ -477,4 +477,21 @@ if not sm_data["error"] and "df" in sm_data:
     plot_df = sm_data["df"]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
-        go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="
+        go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="暗池 DIX (%)", line=dict(color="#3498db", width=2)),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5, dash='dot')),
+        secondary_y=True,
+    )
+    fig.update_layout(title_text="DIX (机构吸筹>=45 vs 派发<40) 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
+    fig.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
+    fig.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
+    st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("""
+---
+💡 **Sentinel 2.0 资金逻辑综合实战指南**：
+1. **看懂 K 线背后的广度死穴**：当标普500每天微涨，而你发现 **SPY/RSP 比率** 飙升，结合开关6预警，这说明中小个股已提前失血，属于典型的**假牛市、真派发**。
+2. **结合你的微观诊断系统**：大盘底部得分 $\ge 4$ 时，是利用你微观量化诊断模型计算个股 EV 最具性价比的时刻。大盘提供的系统性折价，能让模型筛选出的高胜率个股爆发出极强的正向期望收益。
+""")
