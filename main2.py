@@ -160,7 +160,7 @@ def fetch_squeezemetrics_data():
     })
     latest = mock_df.iloc[-1]
     return {
-        "latest_dix": round(latest['dix'], 2), "latest_gex": int(latest['gex']),
+        "dix": round(latest['dix'], 2), "gex": int(latest['gex']),
         "dix_bottom_active": latest['dix'] >= 45.0, "dix_top_active": latest['dix'] < 40.0,
         "gex_bottom_active": latest['gex'] > 0, "gex_top_active": latest['gex'] < 0,
         "error": False, "df": mock_df, "is_mock": True
@@ -177,8 +177,6 @@ def calculate_quant_and_breadth_signals():
         
         # ---------------------------------------------------------------------
         # 开关4：升级版 CTA 动向追踪 (Time-Series Momentum 代理模型)
-        # 逻辑：CTAs 通常使用 1个月(21日), 3个月(63日), 半年(126日) 为趋势过滤线
-        # 当三大指数全部跌破这三根线且出现负乖离极限时，抛压耗尽；反之，买盘枯竭。
         # ---------------------------------------------------------------------
         cta_shorts_exhausted = 0
         cta_longs_exhausted = 0
@@ -212,53 +210,56 @@ def calculate_quant_and_breadth_signals():
         # ---------------------------------------------------------------------
         # 开关6：防粘合 CBOE 衍生品指数交叉判断 (5日 EMA vs 21日 EMA)
         # ---------------------------------------------------------------------
-        # 相关性快慢线，放宽参数彻底解决数字粘合问题
-        # ... 前文代码不变 ...
-        # 相关性快慢线计算
         corr_series = data['^COR1M']
+        dsp_series = data['^DSPX']
+        
+        # 离散度快慢线不管相关性断不断流，都可以正常计算
+        dsp_fast = dsp_series.ewm(span=5, adjust=False).mean()
+        dsp_slow = dsp_series.ewm(span=21, adjust=False).mean()
+        
+        # 默认信号初始化，防止在 if 分支中报 NameError
+        corr_is_broken = False
+        corr_bottom_active = False
+        breadth_top_active = False
         
         # 🚨 数据防伪判定：如果过去 10 天的最大值和最小值一模一样，说明数据断流变平了！
         if corr_series.tail(10).max() == corr_series.tail(10).min():
+            corr_is_broken = True
             cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (⚠️ YF数据源历史断流，无法计算均线拐点)"
-            corr_bottom_active = False # 强制失效，防止系统误判死叉
+            cboe_disp_text = f"当前:{latest.get('^DSPX', 0):.2f} (EMA5:{dsp_fast.iloc[-1]:.2f} / EMA21:{dsp_slow.iloc[-1]:.2f})"
+            
+            # 当数据发生历史断流时，不执行任何均线交叉演算，保持 False 安全降级状态
+            corr_bottom_active = False
+            breadth_top_active = False
         else:
+            # 数据正常时，进入严密的、无交叉覆盖的信号计算域内
             corr_fast = corr_series.ewm(span=5, adjust=False).mean()
             corr_slow = corr_series.ewm(span=21, adjust=False).mean()
             corr_q75 = corr_series.rolling(126).quantile(0.75) 
             corr_q25 = corr_series.rolling(126).quantile(0.25)
             
-            # 只有数据有效且存在波动时，才进行正常的金叉/死叉测算
+            # 💡 精准抄底逻辑
             corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1]
             corr_turning_down = corr_fast.iloc[-1] < corr_slow.iloc[-1]
             corr_bottom_active = corr_recent_high and corr_turning_down
             
+            # 💡 逃顶触发条件
+            market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
+            market_complacent = corr_slow.iloc[-1] < corr_q25.iloc[-1]
+            disp_breaking_up = dsp_fast.iloc[-1] > dsp_slow.iloc[-1]
+            breadth_top_active = market_high and market_complacent and disp_breaking_up
+            
             cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (EMA5:{corr_fast.iloc[-1]:.2f} / EMA21:{corr_slow.iloc[-1]:.2f})"
+            cboe_disp_text = f"当前:{latest.get('^DSPX', 0):.2f} (EMA5:{dsp_fast.iloc[-1]:.2f} / EMA21:{dsp_slow.iloc[-1]:.2f})"
 
-        # 离散度快慢线 (DSPX 类似逻辑，正常保留)
-        # ... 后续代码不变 ...
-        
-        # 离散度快慢线
-        dsp_fast = data['^DSPX'].ewm(span=5, adjust=False).mean()
-        dsp_slow = data['^DSPX'].ewm(span=21, adjust=False).mean()
-        
-        # 💡 精准抄底：不仅要求快线死叉慢线，还要求【慢线在近10个交易日内曾触及高危区(>75%)】
-        corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1]
-        corr_turning_down = corr_fast.iloc[-1] < corr_slow.iloc[-1]
-        corr_bottom_active = corr_recent_high and corr_turning_down
-        
-        # 💡 逃顶触发条件
-        market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
-        market_complacent = corr_slow.iloc[-1] < corr_q25.iloc[-1]
-        disp_breaking_up = dsp_fast.iloc[-1] > dsp_slow.iloc[-1]
-        breadth_top_active = market_high and market_complacent and disp_breaking_up
-        
         spy_rsp_ratio = latest['SPY'] / latest['RSP']
         
         return {
             "error": False,
+            "corr_is_broken": corr_is_broken,
             "cta_status": cta_status_text,
-            "cboe_corr": f"当前:{latest.get('^COR1M', 0):.2f} (EMA5:{corr_fast.iloc[-1]:.2f} / EMA21:{corr_slow.iloc[-1]:.2f})",
-            "cboe_disp": f"当前:{latest.get('^DSPX', 0):.2f} (EMA5:{dsp_fast.iloc[-1]:.2f} / EMA21:{dsp_slow.iloc[-1]:.2f})",
+            "cboe_corr": cboe_corr_text,
+            "cboe_disp": cboe_disp_text,
             "spy_rsp_ratio": round(spy_rsp_ratio, 4),
             "cta_bottom_active": cta_bottom_active,
             "cta_top_active": cta_top_active,
@@ -269,6 +270,10 @@ def calculate_quant_and_breadth_signals():
     except Exception as e:
         return {
             "error": True, "msg": str(e), 
+            "corr_is_broken": True,
+            "cta_status": "异常",
+            "cboe_corr": "异常",
+            "cboe_disp": "异常",
             "cta_bottom_active": False, "cta_top_active": False,
             "corr_bottom_active": False, "breadth_top_active": False
         }
@@ -291,6 +296,7 @@ switches = [
         "source": "SqueezeMetrics (Proxy for SPX/NDX)",
         "desc_bottom": "Gamma由负转正。做市商从‘顺势砸盘’转为‘逆势稳定市场’，左侧流动性危机解除。",
         "desc_top": "Gamma高位转负。做市商对冲盘变砸盘放大器，大盘极易诱发高位闪崩。",
+        "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴")
     },
     {
         "id": 2,
@@ -301,6 +307,7 @@ switches = [
         "source": "CBOE 波动率曲线",
         "desc_bottom": "结构回到 Contango (>1.0)，短期恐慌高潮褪去，买入对冲保护的资金撤退。",
         "desc_top": "结构过度溢价(>1.25)或VIX跌破12。全市场极度自满，往往是暴风雨前夕。",
+        "fetched_status": "成功 🟢" if not vix_data["error"] else "抓取失败 🔴"
     },
     {
         "id": 3,
@@ -311,6 +318,7 @@ switches = [
         "source": "OKX 永续合约 API",
         "desc_bottom": "极端倒挂后费率转正 + 低位OI企稳。表明散户割肉盘结束，多头资金左侧重新建仓。",
         "desc_top": "费率极其亢奋(>0.035%)且OI创历史高位，多头杠杆过载，易触发连环清算。",
+        "fetched_status": "成功 🟢" if not crypto_data["error"] else "抓取失败 🔴"
     },
     {
         "id": 4,
@@ -321,6 +329,7 @@ switches = [
         "source": "基于 1M/3M/6M 动量偏离度演算",
         "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约800亿无脑跟空抛压面临彻底耗尽。",
         "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
+        "fetched_status": "成功 🟢" if not quant_data["error"] else "抓取失败 🔴"
     },
     {
         "id": 5,
@@ -331,6 +340,7 @@ switches = [
         "source": "SqueezeMetrics 暗池吸筹/派发指数",
         "desc_bottom": "DIX 强力站上 45% 以上。明牌大跌时华尔街主力通过暗池疯狂吃单承接，强力左侧底信号。",
         "desc_top": "DIX 跌破 40% 水平。明牌高位拉升时，主力资金在暗池悄悄分批派发利润，散户接盘。",
+        "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴")
     },
     {
         "id": 6,
@@ -341,6 +351,7 @@ switches = [
         "source": "CBOE COR1M / DSPX 指数 (EMA5 与 EMA21)",
         "desc_bottom": "相关性极高位确立【快线死叉跌破慢线】。无差别恐慌抛售正式宣告结束，散户离场，个股迎修复。",
         "desc_top": "指数自满极低位，但离散度快线【金叉突破慢线】。确立结构性分裂，巨头掩护中小盘出货。",
+        "fetched_status": "成功 🟢" if (not quant_data["error"] and not quant_data.get("corr_is_broken", False)) else ("相关性历史数据断流 ⚠️" if quant_data.get("corr_is_broken", False) else "抓取失败 🔴")
     }
 ]
 
@@ -413,6 +424,7 @@ for i, s in enumerate(switches):
             </div>
             <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eee;">
             <p style="margin: 2px 0;"><b>核心底层数据:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
+            <p style="margin: 2px 0; font-size:9.5pt;"><b>📡 数据抓取状态:</b> <span style="font-weight:bold;">{s['fetched_status']}</span></p>
             <p style="margin: 2px 0; font-size:9.5pt;"><b>📈 筑底底层逻辑:</b> <span style="color:#27ae60;">{s['desc_bottom']}</span></p>
             <p style="margin: 2px 0; font-size:9.5pt;"><b>📉 逃顶底层逻辑:</b> <span style="color:#c0392b;">{s['desc_top']}</span></p>
             <p style="margin: 5px 0 0 0; color: #7f8c8d; font-size: 8.5pt;">🧭 数据来源: {s['source']}</p>
@@ -465,21 +477,4 @@ if not sm_data["error"] and "df" in sm_data:
     plot_df = sm_data["df"]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     fig.add_trace(
-        go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="暗池 DIX (%)", line=dict(color="#3498db", width=2)),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5, dash='dot')),
-        secondary_y=True,
-    )
-    fig.update_layout(title_text="DIX (机构吸筹>=45 vs 派发<40) 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
-    fig.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
-    fig.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
-    st.plotly_chart(fig, use_container_width=True)
-
-st.markdown("""
----
-💡 **Sentinel 2.0 资金逻辑综合实战指南**：
-1. **看懂 K 线背后的广度死穴**：当标普500每天微涨，而你发现 **SPY/RSP 比率** 飙升，结合开关6预警，这说明中小个股已提前失血，属于典型的**假牛市、真派发**。
-2. **结合你的微观诊断系统**：大盘底部得分 $\ge 4$ 时，是利用你微观量化诊断模型计算个股 EV 最具性价比的时刻。大盘提供的系统性折价，能让模型筛选出的高胜率个股爆发出极强的正向期望收益。
-""")
+        go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="
