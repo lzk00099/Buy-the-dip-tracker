@@ -451,7 +451,7 @@ for i, s in enumerate(switches):
         """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. 图表可视化与纳指引擎
+# 5. 图表可视化与纳指引擎（已升级：动态收盘位 + 连续走势曲线）
 # -----------------------------------------------------------------------------
 st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
 
@@ -463,14 +463,28 @@ ndx_data = fetch_ndx_chart_data()
 if not ndx_data.empty:
     fig_ndx = go.Figure()
     
-    # K 线图
-    fig_ndx.add_trace(go.Candlestick(
-        x=ndx_data.index, open=ndx_data['Open'], high=ndx_data['High'],
-        low=ndx_data['Low'], close=ndx_data['Close'], name='NDX'
+    # 获取实时最新收盘价，动态替代原有的静态 28830 线位
+    latest_ndx_close = float(ndx_data['Close'].iloc[-1])
+    
+    # 💡 升级1：将原 K 线图替换为平滑的【纳指实际收盘走势曲线】
+    fig_ndx.add_trace(go.Scatter(
+        x=ndx_data.index, 
+        y=ndx_data['Close'], 
+        mode='lines', 
+        name='NDX 实际走势曲线', 
+        line=dict(color='#2980b9', width=2.5) # 使用经典的量化深蓝色曲线
     ))
     
-    # 标注图纸上的关键线位和区间
-    fig_ndx.add_hline(y=28830, line_dash="solid", line_color="#2c3e50", annotation_text="静态收盘参考位 (28,830)", annotation_position="top right")
+    # 💡 升级2：动态收盘参考位（用实时提取的最新价替代固定死板的 28,830）
+    fig_ndx.add_hline(
+        y=latest_ndx_close, 
+        line_dash="solid", 
+        line_color="#2c3e50", 
+        annotation_text=f"动态实时收盘位 ({latest_ndx_close:,.2f})", 
+        annotation_position="top right"
+    )
+    
+    # 保留原有的风控预测边界线（如果需要，未来也可以改为依据 ATR 或标准差动态计算）
     fig_ndx.add_hline(y=28500, line_dash="dash", line_color="#e74c3c", annotation_text="CTA 二次抛售加速位 (28,500)", annotation_position="bottom right")
     fig_ndx.add_hline(y=26500, line_dash="dash", line_color="#c0392b", annotation_text="极端下影/二次冲洗 (26,500)", annotation_position="bottom right")
     
@@ -481,10 +495,10 @@ if not ndx_data.empty:
     )
 
     fig_ndx.update_layout(
-        title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演",
+        title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演 (实时数据驱动)",
         template="plotly_white",
         yaxis_title="NDX Index Points",
-        xaxis_rangeslider_visible=False,
+        xaxis_rangeslider_visible=False, # 曲线模式下关闭下方复杂的滑块，保持看板清爽
         height=500,
         margin=dict(l=20, r=20, t=40, b=20)
     )
