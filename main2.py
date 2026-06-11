@@ -451,13 +451,13 @@ for i, s in enumerate(switches):
         """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. 图表可视化与纳指引擎（🔥 修复 MultiIndex 转换报错版）
+# 5. 图表可视化与纳指引擎（🔥 已升级：智能自适应 Y 轴缩放，彻底解决图形压缩）
 # -----------------------------------------------------------------------------
 st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
 
 @st.cache_data(ttl=1800)
 def fetch_ndx_chart_data():
-    # 💡 核心修复：单资产下载改用 history()。它返回标准的单层列名，彻底根除 float() 转换报错
+    # 保持使用标准单层 history 规避之前的 MultiIndex 报错 Bug
     df = yf.Ticker('^NDX').history(period='3mo')
     return df
 
@@ -465,19 +465,19 @@ ndx_data = fetch_ndx_chart_data()
 if not ndx_data.empty:
     fig_ndx = go.Figure()
     
-    # 此时 ndx_data['Close'] 是标准的 1D Series，iloc[-1] 是纯数值，float() 可以完美无误执行
+    # 获取最新收盘价
     latest_ndx_close = float(ndx_data['Close'].iloc[-1])
     
-    # 将原 K 线图替换为平滑的【纳指实际收盘走势曲线】
+    # 渲染纳指实际收盘走势曲线
     fig_ndx.add_trace(go.Scatter(
         x=ndx_data.index, 
         y=ndx_data['Close'], 
         mode='lines', 
         name='NDX 实际走势曲线', 
-        line=dict(color='#2980b9', width=2.5) # 量化深蓝走势线
+        line=dict(color='#2980b9', width=2.5)
     ))
     
-    # 动态收盘参考位（实时提取最新收盘价）
+    # 动态实时收盘位横线
     fig_ndx.add_hline(
         y=latest_ndx_close, 
         line_dash="solid", 
@@ -496,15 +496,54 @@ if not ndx_data.empty:
         annotation_text="核心承接区 (27,200 - 28,000)", annotation_position="inside top right"
     )
 
+    # 💡 核心升级：量化级智能自适应 Y 轴 Scale 算法
+    data_min = float(ndx_data['Close'].min())
+    data_max = float(ndx_data['Close'].max())
+    
+    # 第一步：以实际走势建立基础视野（上下留出 3% 的呼吸空间）
+    y_range_min = data_min * 0.97
+    y_range_max = data_max * 1.03
+    
+    # 第二步：智能探测风控参考线。如果离当前价格在 12% 以内，则延展视野将其包含进来
+    # 这样既保证了能看到关键线位，又防止了线位过远导致主曲线被压扁
+    if 26500 >= data_min * 0.88 and 26500 <= data_max * 1.12:
+        y_range_min = min(y_range_min, 26500 * 0.99)
+    if 28500 >= data_min * 0.88 and 28500 <= data_max * 1.12:
+        y_range_max = max(y_range_max, 28500 * 1.01)
+
     fig_ndx.update_layout(
-        title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演 (实时数据驱动)",
+        title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演 (智能自适应缩放)",
         template="plotly_white",
-        yaxis_title="NDX Index Points",
+        # 💡 应用强制缩放边界，不给 Plotly 胡乱压缩的机会
+        yaxis=dict(
+            title="NDX Index Points",
+            range=[y_range_min, y_range_max],
+            autorange=False, # 必须关闭自动全包裹
+            tickformat=",.0f" # 数字千分位格式化
+        ),
         xaxis_rangeslider_visible=False,
         height=500,
         margin=dict(l=20, r=20, t=40, b=20)
     )
     st.plotly_chart(fig_ndx, use_container_width=True)
+
+
+st.markdown("### 📈 机构吸筹/派发量化趋势观测")
+if not sm_data["error"] and "df" in sm_data:
+    plot_df = sm_data["df"]
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="暗池 DIX (%)", line=dict(color="#3498db", width=2)),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5, dash='dot')),
+        secondary_y=True,
+    )
+    fig.update_layout(title_text="DIX (机构吸筹>=45 vs 派发<40) 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
+    fig.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
+    fig.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
+    st.plotly_chart(fig, use_container_width=True)
 
 
 st.markdown("### 📈 机构吸筹/派发量化趋势观测")
