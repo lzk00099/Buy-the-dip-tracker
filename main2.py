@@ -166,114 +166,133 @@ def fetch_squeezemetrics_data():
         "error": False, "df": mock_df, "is_mock": True
     }
 
+@st.cache_data(ttl=14400)
+def fetch_cboe_official_history(symbol):
+    """从 CBOE 官方 CDN 直接拉取最权威的历史完整序列"""
+    try:
+        url = f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        # CBOE 官方数据包含完整的历史
+        df = pd.read_csv(url)
+        df.columns = df.columns.str.lower()
+        
+        # 兼容官方的 trade_date 或 date 字段
+        date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
+        df['date'] = pd.to_datetime(df[date_col])
+        df.set_index('date', inplace=True)
+        df = df.sort_index()
+        return df['close']
+    except Exception as e:
+        return pd.Series()
+
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """开关4 & 开关6：专业级 CTA 动量模型与 CBOE 精准防粘合交叉计算"""
+    """升级版：大盘 ETF 与 CBOE 官方数据混合对齐引擎"""
     try:
-        tickers = ['QQQ', 'SPY', 'IWM', '^COR1M', '^DSPX', 'RSP']
-        data = yf.download(tickers, period='1y', progress=False)['Close']
-        data = data.ffill() 
-        latest = data.iloc[-1]
+        # 1. 正常的指数和 ETF 依然走 yfinance 获取高频数据
+        yf_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
+        yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
+        yf_data = yf_data.ffill()
+        latest = yf_data.iloc[-1]
         
+        # 创建基础的清洗后 DataFrame
+        data = yf_data[['QQQ', 'SPY', 'IWM', 'RSP']].copy()
+        
+        # 2. 核心修复：单独拉取 CBOE 官方的 COR1M 和 DSPX 历史数据
+        corr_official = fetch_cboe_official_history('COR1M')
+        dspx_official = fetch_cboe_official_history('DSPX')
+        
+        # 3. 混合对齐逻辑：用官方历史垫底，如果今天官方还没更新，用 yfinance 的最新实时值补上
+        # 处理相关性序列
+        if not corr_official.empty:
+            corr_series = corr_official.reindex(data.index)
+            if np.isnan(corr_series.iloc[-1]) or corr_series.tail(10).max() == corr_series.tail(10).min():
+                corr_series.iloc[-1] = latest.get('^COR1M', corr_series.dropna().iloc[-1] if not corr_series.dropna().empty else 17.8)
+            corr_series = corr_series.ffill()
+        else:
+            corr_series = yf_data['^COR1M'] # 兜底机制
+            
+        # 处理离散度序列
+        if not dspx_official.empty:
+            dspx_series = dspx_official.reindex(data.index)
+            if np.isnan(dspx_series.iloc[-1]):
+                dspx_series.iloc[-1] = latest.get('^DSPX', dspx_series.dropna().iloc[-1] if not dspx_series.dropna().empty else 40.0)
+            dspx_series = dspx_series.ffill()
+        else:
+            dspx_series = yf_data['^DSPX'] # 兜底机制
+
         # ---------------------------------------------------------------------
-        # 开关4：升级版 CTA 动向追踪 (Time-Series Momentum 代理模型)
+        # 开关4：升级版 CTA 动向追踪 (保持原样)
         # ---------------------------------------------------------------------
         cta_shorts_exhausted = 0
         cta_longs_exhausted = 0
-        
         for idx_name in ['QQQ', 'SPY', 'IWM']:
             price = data[idx_name]
             ma21 = price.rolling(21).mean()
             ma63 = price.rolling(63).mean()
             ma126 = price.rolling(126).mean()
-            
             p_cur = price.iloc[-1]
-            
-            # 跌破所有核心趋势线，且距离21日线极度超卖(乖离率 < -4%)
             if p_cur < ma21.iloc[-1] and p_cur < ma63.iloc[-1] and p_cur < ma126.iloc[-1]:
                 if (p_cur - ma21.iloc[-1]) / ma21.iloc[-1] < -0.04:
                     cta_shorts_exhausted += 1
-                    
-            # 突破所有核心趋势线，且距离21日线极度超买(乖离率 > 4%)
             if p_cur > ma21.iloc[-1] and p_cur > ma63.iloc[-1] and p_cur > ma126.iloc[-1]:
                 if (p_cur - ma21.iloc[-1]) / ma21.iloc[-1] > 0.04:
                     cta_longs_exhausted += 1
 
-        cta_bottom_active = cta_shorts_exhausted >= 2 # 至少两个大盘指数触及抛压耗尽
+        cta_bottom_active = cta_shorts_exhausted >= 2
         cta_top_active = cta_longs_exhausted >= 2
-
         cta_status_text = "多头趋势/系统性买入中"
         if cta_bottom_active: cta_status_text = "系统性空头抛压耗尽"
         elif cta_top_active: cta_status_text = "系统性多头买盘枯竭"
         elif cta_shorts_exhausted > 0 or cta_longs_exhausted > 0: cta_status_text = "CTA 动量分化调仓期"
 
         # ---------------------------------------------------------------------
-        # 开关6：防粘合 CBOE 衍生品指数交叉判断 (5日 EMA vs 21日 EMA)
+        # 开关6：防粘合 CBOE 交叉判断（使用混合对齐后的完整序列计算均线）
         # ---------------------------------------------------------------------
-        corr_series = data['^COR1M']
-        dsp_series = data['^DSPX']
-        
-        # 离散度快慢线不管相关性断不断流，都可以正常计算
-        dsp_fast = dsp_series.ewm(span=5, adjust=False).mean()
-        dsp_slow = dsp_series.ewm(span=21, adjust=False).mean()
-        
-        # 默认信号初始化，防止在 if 分支中报 NameError
-        corr_is_broken = False
-        corr_bottom_active = False
-        breadth_top_active = False
-        
-        # 🚨 数据防伪判定：如果过去 10 天的最大值和最小值一模一样，说明数据断流变平了！
         if corr_series.tail(10).max() == corr_series.tail(10).min():
-            corr_is_broken = True
-            cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (⚠️ YF数据源历史断流，无法计算均线拐点)"
-            cboe_disp_text = f"当前:{latest.get('^DSPX', 0):.2f} (EMA5:{dsp_fast.iloc[-1]:.2f} / EMA21:{dsp_slow.iloc[-1]:.2f})"
-            
-            # 当数据发生历史断流时，不执行任何均线交叉演算，保持 False 安全降级状态
-            corr_bottom_active = False
-            breadth_top_active = False
+            cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (⚠️ 历史断流，无法计算均线拐点)"
+            corr_bottom_active = False 
         else:
-            # 数据正常时，进入严密的、无交叉覆盖的信号计算域内
             corr_fast = corr_series.ewm(span=5, adjust=False).mean()
             corr_slow = corr_series.ewm(span=21, adjust=False).mean()
             corr_q75 = corr_series.rolling(126).quantile(0.75) 
             corr_q25 = corr_series.rolling(126).quantile(0.25)
             
-            # 💡 精准抄底逻辑
             corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1]
             corr_turning_down = corr_fast.iloc[-1] < corr_slow.iloc[-1]
             corr_bottom_active = corr_recent_high and corr_turning_down
-            
-            # 💡 逃顶触发条件
-            market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
+            cboe_corr_text = f"当前:{corr_series.iloc[-1]:.2f} (EMA5:{corr_fast.iloc[-1]:.2f} / EMA21:{corr_slow.iloc[-1]:.2f})"
+        
+        # 离散度快慢线计算
+        dsp_fast = dspx_series.ewm(span=5, adjust=False).mean()
+        dsp_slow = dspx_series.ewm(span=21, adjust=False).mean()
+        
+        market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
+        try:
             market_complacent = corr_slow.iloc[-1] < corr_q25.iloc[-1]
-            disp_breaking_up = dsp_fast.iloc[-1] > dsp_slow.iloc[-1]
-            breadth_top_active = market_high and market_complacent and disp_breaking_up
-            
-            cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (EMA5:{corr_fast.iloc[-1]:.2f} / EMA21:{corr_slow.iloc[-1]:.2f})"
-            cboe_disp_text = f"当前:{latest.get('^DSPX', 0):.2f} (EMA5:{dsp_fast.iloc[-1]:.2f} / EMA21:{dsp_slow.iloc[-1]:.2f})"
-
+        except:
+            market_complacent = False
+        disp_breaking_up = dsp_fast.iloc[-1] > dsp_slow.iloc[-1]
+        breadth_top_active = market_high and market_complacent and disp_breaking_up
+        
         spy_rsp_ratio = latest['SPY'] / latest['RSP']
         
         return {
             "error": False,
-            "corr_is_broken": corr_is_broken,
             "cta_status": cta_status_text,
             "cboe_corr": cboe_corr_text,
-            "cboe_disp": cboe_disp_text,
+            "cboe_disp": f"当前:{dspx_series.iloc[-1]:.2f} (EMA5:{dsp_fast.iloc[-1]:.2f} / EMA21:{dsp_slow.iloc[-1]:.2f})",
             "spy_rsp_ratio": round(spy_rsp_ratio, 4),
             "cta_bottom_active": cta_bottom_active,
             "cta_top_active": cta_top_active,
             "corr_bottom_active": corr_bottom_active,
             "breadth_top_active": breadth_top_active
         }
-        
     except Exception as e:
         return {
             "error": True, "msg": str(e), 
-            "corr_is_broken": True,
-            "cta_status": "异常",
-            "cboe_corr": "异常",
-            "cboe_disp": "异常",
             "cta_bottom_active": False, "cta_top_active": False,
             "corr_bottom_active": False, "breadth_top_active": False
         }
