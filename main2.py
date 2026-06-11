@@ -213,10 +213,29 @@ def calculate_quant_and_breadth_signals():
         # 开关6：防粘合 CBOE 衍生品指数交叉判断 (5日 EMA vs 21日 EMA)
         # ---------------------------------------------------------------------
         # 相关性快慢线，放宽参数彻底解决数字粘合问题
-        corr_fast = data['^COR1M'].ewm(span=5, adjust=False).mean()
-        corr_slow = data['^COR1M'].ewm(span=21, adjust=False).mean()
-        corr_q75 = data['^COR1M'].rolling(126).quantile(0.75) 
-        corr_q25 = data['^COR1M'].rolling(126).quantile(0.25)
+        # ... 前文代码不变 ...
+        # 相关性快慢线计算
+        corr_series = data['^COR1M']
+        
+        # 🚨 数据防伪判定：如果过去 10 天的最大值和最小值一模一样，说明数据断流变平了！
+        if corr_series.tail(10).max() == corr_series.tail(10).min():
+            cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (⚠️ YF数据源历史断流，无法计算均线拐点)"
+            corr_bottom_active = False # 强制失效，防止系统误判死叉
+        else:
+            corr_fast = corr_series.ewm(span=5, adjust=False).mean()
+            corr_slow = corr_series.ewm(span=21, adjust=False).mean()
+            corr_q75 = corr_series.rolling(126).quantile(0.75) 
+            corr_q25 = corr_series.rolling(126).quantile(0.25)
+            
+            # 只有数据有效且存在波动时，才进行正常的金叉/死叉测算
+            corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1]
+            corr_turning_down = corr_fast.iloc[-1] < corr_slow.iloc[-1]
+            corr_bottom_active = corr_recent_high and corr_turning_down
+            
+            cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (EMA5:{corr_fast.iloc[-1]:.2f} / EMA21:{corr_slow.iloc[-1]:.2f})"
+
+        # 离散度快慢线 (DSPX 类似逻辑，正常保留)
+        # ... 后续代码不变 ...
         
         # 离散度快慢线
         dsp_fast = data['^DSPX'].ewm(span=5, adjust=False).mean()
