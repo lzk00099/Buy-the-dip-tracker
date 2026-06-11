@@ -46,7 +46,7 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """开关2：获取VIX期限结构（双向逻辑判断 - 已加入终极防 NaN 兜底）"""
+    """开关2：获取VIX期限结构"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
         hist = tickers.history(period='5d')
@@ -64,7 +64,7 @@ def fetch_vix_data():
             ratio = vix3m / vix
             
             bottom_active = ratio > 1.0  # 回到 Contango 视为抄底信号之一
-            top_active = vix < 12.0 or ratio > 1.25  # 极端自满，波动率被深度压制，见顶风险
+            top_active = vix < 12.0 or ratio > 1.25  # 极端自满
             
             return {
                 "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3),
@@ -76,7 +76,7 @@ def fetch_vix_data():
 
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
-    """开关3：获取加密货币资产永续合约资金费率与OI趋势（双向逻辑判断）"""
+    """开关3：获取加密货币资产永续合约资金费率与OI趋势"""
     try:
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
@@ -93,7 +93,7 @@ def fetch_crypto_signals():
         open_interest = float(oi_res['data'][0]['oiCcy'])
         
         bottom_active = funding_rate >= 0.0  # 费率转正表示情绪企稳
-        top_active = funding_rate >= 0.035  # 单期费率超 0.035% 代表高位杠杆过载严重
+        top_active = funding_rate >= 0.035  # 杠杆过载
         
         return {
             "funding_rate": f"{funding_rate:.4f}%", "oi": f"{open_interest:,.0f}",
@@ -104,10 +104,10 @@ def fetch_crypto_signals():
 
 @st.cache_data(ttl=3600)
 def fetch_squeezemetrics_data():
-    """开关1 & 开关5：获取 SqueezeMetrics 的 DIX 和 GEX 数据（带冷却本地缓存与双向逻辑）"""
+    """开关1 & 开关5：获取 SqueezeMetrics 的 DIX 和 GEX 数据"""
     url = "https://squeezemetrics.com/monitor/static/DIX.csv"
     cache_file = "dix_cache.csv"
-    cooldown_seconds = 4 * 60 * 60  # 优化为4小时冷却，保证跨日盘前更新及时
+    cooldown_seconds = 4 * 60 * 60
     should_download = True
     
     if os.path.exists(cache_file):
@@ -152,6 +152,7 @@ def fetch_squeezemetrics_data():
         except Exception:
             pass
 
+    # Mock兜底数据
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates, 'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,
@@ -167,63 +168,66 @@ def fetch_squeezemetrics_data():
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """
-    【核心重大升级修正】开关4 & 开关6：
-    1. 开关6：改用 CBOE 隐含相关性与离散度指数的 EMA 快慢线交叉模型，精准抓取“见顶回落”和“动量回归”拐点
-    2. 开关4：综合评估大盘指数超买超卖，系统化探测 CTA 空头耗尽与多头边际衰竭
-    """
+    """开关4 & 开关6：专业级 CTA 动量模型与 CBOE 精准防粘合交叉计算"""
     try:
         tickers = ['QQQ', 'SPY', 'IWM', '^COR1M', '^DSPX', 'RSP']
         data = yf.download(tickers, period='1y', progress=False)['Close']
-        data = data.ffill()  # 深度前向填充
-        
+        data = data.ffill() 
         latest = data.iloc[-1]
         
         # ---------------------------------------------------------------------
-        # 开关4：CTA 趋势跟随矩阵系统化建模 (综合 QQQ, IWM, SPY 偏离动量)
+        # 开关4：升级版 CTA 动向追踪 (Time-Series Momentum 代理模型)
+        # 逻辑：CTAs 通常使用 1个月(21日), 3个月(63日), 半年(126日) 为趋势过滤线
+        # 当三大指数全部跌破这三根线且出现负乖离极限时，抛压耗尽；反之，买盘枯竭。
         # ---------------------------------------------------------------------
-        cta_signals = {}
+        cta_shorts_exhausted = 0
+        cta_longs_exhausted = 0
+        
         for idx_name in ['QQQ', 'SPY', 'IWM']:
             price = data[idx_name]
-            ma20 = price.rolling(20).mean()
-            ma50 = price.rolling(50).mean()
-            ma200 = price.rolling(200).mean()
+            ma21 = price.rolling(21).mean()
+            ma63 = price.rolling(63).mean()
+            ma126 = price.rolling(126).mean()
             
-            score = 0
-            if price.iloc[-1] > ma20.iloc[-1]: score += 1
-            if price.iloc[-1] > ma50.iloc[-1]: score += 1
-            if price.iloc[-1] > ma200.iloc[-1]: score += 1
-            cta_signals[idx_name] = {
-                'score': score,
-                'dist_200': (price.iloc[-1] - ma200.iloc[-1]) / ma200.iloc[-1]
-            }
-        
-        avg_dist_200 = np.mean([cta_signals[k]['dist_200'] for k in cta_signals])
-        total_trend_score = sum([cta_signals[k]['score'] for k in cta_signals])  # 总分 0-9
-        
-        # 优化阈值边界：均线多空极值 + 200日线偏离拐点
-        cta_bottom_active = (total_trend_score <= 1) and (avg_dist_200 < -0.08)
-        cta_top_active = (total_trend_score >= 8) and (avg_dist_200 > 0.11)
-        
+            p_cur = price.iloc[-1]
+            
+            # 跌破所有核心趋势线，且距离21日线极度超卖(乖离率 < -4%)
+            if p_cur < ma21.iloc[-1] and p_cur < ma63.iloc[-1] and p_cur < ma126.iloc[-1]:
+                if (p_cur - ma21.iloc[-1]) / ma21.iloc[-1] < -0.04:
+                    cta_shorts_exhausted += 1
+                    
+            # 突破所有核心趋势线，且距离21日线极度超买(乖离率 > 4%)
+            if p_cur > ma21.iloc[-1] and p_cur > ma63.iloc[-1] and p_cur > ma126.iloc[-1]:
+                if (p_cur - ma21.iloc[-1]) / ma21.iloc[-1] > 0.04:
+                    cta_longs_exhausted += 1
+
+        cta_bottom_active = cta_shorts_exhausted >= 2 # 至少两个大盘指数触及抛压耗尽
+        cta_top_active = cta_longs_exhausted >= 2
+
+        cta_status_text = "多头趋势/系统性买入中"
+        if cta_bottom_active: cta_status_text = "系统性空头抛压耗尽"
+        elif cta_top_active: cta_status_text = "系统性多头买盘枯竭"
+        elif cta_shorts_exhausted > 0 or cta_longs_exhausted > 0: cta_status_text = "CTA 动量分化调仓期"
+
         # ---------------------------------------------------------------------
-        # 【微观结构升级】开关6：CBOE 衍生品指数隐含快慢线交叉判断 (3日 EMA vs 10日 EMA)
+        # 开关6：防粘合 CBOE 衍生品指数交叉判断 (5日 EMA vs 21日 EMA)
         # ---------------------------------------------------------------------
-        # 相关性快慢线与分位数边界
-        corr_fast = data['^COR1M'].ewm(span=3, adjust=False).mean()
-        corr_slow = data['^COR1M'].ewm(span=10, adjust=False).mean()
-        corr_q75 = data['^COR1M'].rolling(120).quantile(0.75)  # 恐慌高位线
-        corr_q25 = data['^COR1M'].rolling(120).quantile(0.25)  # 自满低位线
+        # 相关性快慢线，放宽参数彻底解决数字粘合问题
+        corr_fast = data['^COR1M'].ewm(span=5, adjust=False).mean()
+        corr_slow = data['^COR1M'].ewm(span=21, adjust=False).mean()
+        corr_q75 = data['^COR1M'].rolling(126).quantile(0.75) 
+        corr_q25 = data['^COR1M'].rolling(126).quantile(0.25)
         
         # 离散度快慢线
-        dsp_fast = data['^DSPX'].ewm(span=3, adjust=False).mean()
-        dsp_slow = data['^DSPX'].ewm(span=10, adjust=False).mean()
+        dsp_fast = data['^DSPX'].ewm(span=5, adjust=False).mean()
+        dsp_slow = data['^DSPX'].ewm(span=21, adjust=False).mean()
         
-        # 💡 抄底触发条件：相关性慢线曾处于高位危机区(>75%)，且当前快线已【死叉跌破慢线】——确认泥沙俱下抛售见顶回落
-        corr_was_high = corr_slow.iloc[-1] > corr_q75.iloc[-1]
+        # 💡 精准抄底：不仅要求快线死叉慢线，还要求【慢线在近10个交易日内曾触及高危区(>75%)】
+        corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1]
         corr_turning_down = corr_fast.iloc[-1] < corr_slow.iloc[-1]
-        corr_bottom_active = corr_was_high and corr_turning_down
+        corr_bottom_active = corr_recent_high and corr_turning_down
         
-        # 💡 逃顶触发条件：大盘高位(SPY>MA50) + 相关性受限极度自满(<25%) + 离散度快线【金叉向上突破慢线】——确认结构性解耦派发爆发
+        # 💡 逃顶触发条件
         market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
         market_complacent = corr_slow.iloc[-1] < corr_q25.iloc[-1]
         disp_breaking_up = dsp_fast.iloc[-1] > dsp_slow.iloc[-1]
@@ -233,9 +237,9 @@ def calculate_quant_and_breadth_signals():
         
         return {
             "error": False,
-            "cta_score": f"{total_trend_score}/9 (均线偏离: {avg_dist_200*100:.2f}%)",
-            "cboe_corr": f"当前:{latest.get('^COR1M', 0):.1f} (快线:{corr_fast.iloc[-1]:.1f}/慢线:{corr_slow.iloc[-1]:.1f})",
-            "cboe_disp": f"当前:{latest.get('^DSPX', 0):.1f} (快线:{dsp_fast.iloc[-1]:.1f}/慢线:{dsp_slow.iloc[-1]:.1f})",
+            "cta_status": cta_status_text,
+            "cboe_corr": f"当前:{latest.get('^COR1M', 0):.2f} (EMA5:{corr_fast.iloc[-1]:.2f} / EMA21:{corr_slow.iloc[-1]:.2f})",
+            "cboe_disp": f"当前:{latest.get('^DSPX', 0):.2f} (EMA5:{dsp_fast.iloc[-1]:.2f} / EMA21:{dsp_slow.iloc[-1]:.2f})",
             "spy_rsp_ratio": round(spy_rsp_ratio, 4),
             "cta_bottom_active": cta_bottom_active,
             "cta_top_active": cta_top_active,
@@ -267,7 +271,7 @@ switches = [
         "value": f"GEX 绝对值: {sm_data.get('gex', 0):,}" if not sm_data["error"] else "数据源异常",
         "source": "SqueezeMetrics (Proxy for SPX/NDX)",
         "desc_bottom": "Gamma由负转正。做市商从‘顺势砸盘’转为‘逆势稳定市场’，左侧流动性危机解除。",
-        "desc_top": "Gamma高位转负(Flip to Negative)。做市商对冲盘变砸盘放大器，大盘极易诱发高位闪崩。",
+        "desc_top": "Gamma高位转负。做市商对冲盘变砸盘放大器，大盘极易诱发高位闪崩。",
     },
     {
         "id": 2,
@@ -275,9 +279,9 @@ switches = [
         "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
         "top_active": vix_data["top_active"] if not vix_data["error"] else False,
         "value": f"VIX3M/VIX 比率: {vix_data.get('ratio', 'N/A')} | VIX: {vix_data.get('vix', 'N/A')}",
-        "source": "CBOE 波动率曲线 (Yahoo Finance)",
+        "source": "CBOE 波动率曲线",
         "desc_bottom": "结构回到 Contango (>1.0)，短期恐慌高潮褪去，买入对冲保护的资金撤退。",
-        "desc_top": "结构过度溢价(>1.25)或VIX跌破12。全市场极度自满，无人购买保险，往往是暴风雨前夕。",
+        "desc_top": "结构过度溢价(>1.25)或VIX跌破12。全市场极度自满，往往是暴风雨前夕。",
     },
     {
         "id": 3,
@@ -286,18 +290,18 @@ switches = [
         "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
         "value": f"资金费率: {crypto_data.get('funding_rate', 'N/A')} | OI: {crypto_data.get('oi', 'N/A')}",
         "source": "OKX 永续合约 API",
-        "desc_bottom": "极端倒挂后费率重新转正，低位OI企稳，表明散户割肉盘结束，多头资金左侧重新建仓。",
-        "desc_top": "费率极其亢奋(单期>0.035%)且OI创历史高位，多头杠杆过载，极易触发连环多头清算踩踏。",
+        "desc_bottom": "极端倒挂后费率转正 + 低位OI企稳。表明散户割肉盘结束，多头资金左侧重新建仓。",
+        "desc_top": "费率极其亢奋(>0.035%)且OI创历史高位，多头杠杆过载，易触发连环清算。",
     },
     {
         "id": 4,
-        "name": "CTA 系统化全局动量矩阵 (SPY/QQQ/IWM 共振)",
+        "name": "CTA 动量矩阵 (系统性抛压/买盘极值监测)",
         "bottom_active": quant_data["cta_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["cta_top_active"] if not quant_data["error"] else False,
-        "value": f"{quant_data.get('cta_score', 'N/A')}",
-        "source": "Sentinel 多时区跨资产动量演算矩阵",
-        "desc_bottom": "三大股指均线全面跌破且极度超跌。CTA趋势跟随空头仓位打满，无脑顺势砸盘的系统性抛压面临耗尽与空头回补。",
-        "desc_top": "三大股指均线极度超买，总分触顶。趋势基金无脑买入的边际力量全面满仓，市场缺乏后续增量买家，多头动量衰竭。",
+        "value": f"当前状态: {quant_data.get('cta_status', 'N/A')}",
+        "source": "基于 1M/3M/6M 动量偏离度演算",
+        "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约800亿无脑跟空抛压面临彻底耗尽。",
+        "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
     },
     {
         "id": 5,
@@ -307,17 +311,17 @@ switches = [
         "value": f"DIX 比例: {sm_data.get('dix', 'N/A')}%",
         "source": "SqueezeMetrics 暗池吸筹/派发指数",
         "desc_bottom": "DIX 强力站上 45% 以上。明牌大跌时华尔街主力通过暗池疯狂吃单承接，强力左侧底信号。",
-        "desc_top": "DIX 跌破 40% 水平。明牌高位拉升时，主力资金在暗池悄悄分批派发利润，散户在明牌接盘。",
+        "desc_top": "DIX 跌破 40% 水平。明牌高位拉升时，主力资金在暗池悄悄分批派发利润，散户接盘。",
     },
     {
         "id": 6,
-        "name": "CBOE 官方隐含相关性拐点与离散度爆发 (微观解耦)",
+        "name": "全局隐含相关性拐点与离散度爆发",
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
-        "value": f"{quant_data.get('cboe_corr', 'N/A')} | {quant_data.get('cboe_disp', 'N/A')}",
-        "source": "CBOE (芝加哥期权交易所官方衍生品指标)",
-        "desc_bottom": "相关性慢线在 >75% 极高位确立【快线死叉跌破慢线】。无差别恐慌抛售正式宣告结束，资金重新回归个股基本面，多头黄金左侧拐点确立。",
-        "desc_top": "大盘高位且相关性极度低迷(<25%)，但离散度快线【金叉向上突破慢线】。确立结构性分裂，主力疯狂拉抬头部巨头掩护出货，中小盘暗中破位，高危顶背离。",
+        "value": f"相关性 {quant_data.get('cboe_corr', 'N/A')} | 离散度 {quant_data.get('cboe_disp', 'N/A')}",
+        "source": "CBOE COR1M / DSPX 指数 (EMA5 与 EMA21)",
+        "desc_bottom": "相关性极高位确立【快线死叉跌破慢线】。无差别恐慌抛售正式宣告结束，散户离场，个股迎修复。",
+        "desc_top": "指数自满极低位，但离散度快线【金叉突破慢线】。确立结构性分裂，巨头掩护中小盘出货。",
     }
 ]
 
@@ -330,7 +334,6 @@ top_score = sum([1 for s in switches if s["top_active"]])
 st.title("🛡️ Sentinel 2.0 核心决策系统：大盘底层资金双向雷达")
 st.subheader(f"数据实时快照: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 全局宏观雷达双向看板
 st.markdown("### 📊 综合大盘多空状态与量化应对措施")
 c1, c2 = st.columns(2)
 
@@ -339,32 +342,26 @@ with c1:
 with c2:
     st.metric(label="🚨 见顶风控激活数 (提前逃顶信号)", value=f"{top_score} / 6", delta="-触发高位逃顶线" if top_score >= 4 else "处于安全健康牛市", delta_color="inverse")
 
-# 💡 联动修改：全面升级宏观综合决策的文本逻辑表达
+# 💡 联动修改：全面升级微观执行端联动
 if top_score >= 4:
     status_color = "red"
-    action_title = "🚨 【红色暴风雨：微观解耦割裂爆发，触发全面防守逃顶线】"
+    action_title = "🚨 【红色暴风雨：触发全面防守逃顶线】"
     action_text = (
-        "**资金流底层逻辑演算**：当前市场表象虚假繁荣，但微观衍生品锁链已拉响极端警报！"
-        "CBOE 离散度快线已金叉向上突破慢线，同时指数隐含相关性被死死压制在 25% 极低自满区，这代表个股底层结构已经极度割裂（巨头掩护、小盘破位爆发）；"
-        "同时，CTA 趋势跟随矩阵已处于超买顶峰。结合暗池 DIX 出货特征与做市商 GEX 变盘隐患，**必须全面收紧个股诊断模型的止盈线，严格限制多头杠杆交易，多头战略防守**。"
-    )
-elif bottom_score >= 5:
-    status_color = "green"
-    action_title = "🚀 【绿色共振：泥沙俱下恐慌耗尽，触发拐点重仓抄底红线】"
-    action_text = (
-        "**资金流底层逻辑演算**：黄金左侧大底确立！CBOE 隐含相关性慢线在冲入 >75% 极高危机区后，"
-        "当前确立【快线死叉跌破慢线】的关键拐点，宣告无差别流动性踩踏砸盘正式告一段落，市场离散度开始健康回归。"
-        "同时，暗池机构（DIX >= 45%）展现出强力的疯狂扫货标签，CTA 抛压清算完毕。做市商 Gamma 重回正值护盘。"
-        "建议：**全线开启多头精准抄底模式**，可主动提高个股 Expected Value 诊断模型的仓位乘数（允许放行杠杆 ETF 过滤逻辑）。"
+        "**底层逻辑演算**：市场表象繁荣，但 CBOE 离散度快线已金叉，相关性死死压制在低位。CTA 动量面临高位多头买盘枯竭。"
+        "必须**全面收紧个股诊断模型的止盈线**，严格限制多头杠杆交易，多头战略转为防守撤退阶段。"
     )
 elif bottom_score >= 4:
-    status_color = "blue"
-    action_title = "✅ 【蓝色稳健：底部动量衰竭确认，允许右侧分批确认介入】"
-    action_text = "**应对措施**：无差别砸盘动能被多方有效承接，做市商从砸盘者转化为护盘者。可以利用 Random Forest 模型筛选出的高胜率、短持有周期标的建立 30%-50% 的多头底仓。"
+    status_color = "green"
+    action_title = "🚀 【绿色共振：泥沙俱下恐慌耗尽，触发拐点重仓抄底】"
+    action_text = (
+        "**底层逻辑演算**：黄金左侧大底确立！CBOE 隐含相关性已从高危区确立【死叉回落】，宣告无差别流动性踩踏结束。"
+        "同时 CTA 约800亿系统性抛压面临耗尽，暗池机构（DIX >= 45%）扫货印证见底。<br><br>"
+        "**应对措施**：建议全线开启多头精准抄底模式。此时可启动股票诊断模型，输入至多 5 只目标代码，利用 Random Forest 与 Expected Value (EV) 引擎测算其胜率、EV 及预期到达目标的周期时长（日/周/月）。在当前 QQQ、IWM、SPY 的筑底环境共振下，**可放宽杠杆 ETF 的特殊过滤逻辑**，严格执行模型输出的建议买入价、止盈点与止损点。"
+    )
 else:
     status_color = "orange"
-    action_title = "⏳ 【黄色震荡：多空信号交织，结构分化行情】"
-    action_text = "**应对措施**：既无大范围恐慌见底的暴力抄底机会，也无巨头掩护派发的见顶危机。市场处于健康的轮动或锯齿形震荡中。维持中性仓位，跟随个股诊断模型的常规 EV 策略严格高抛低吸即可。"
+    action_title = "⏳ 【黄色震荡：多空交织，结构分化】"
+    action_text = "**应对措施**：无极端抄底或逃顶信号。维持中性仓位，输入自选代码使用个股诊断模型常规运行，寻找结构性 EV 错杀机会高抛低吸。"
 
 st.markdown(f"""
 <div style="padding:15px; border-radius:8px; border-left: 6px solid {status_color}; background-color:#fafafa; margin-bottom:20px;">
@@ -404,8 +401,46 @@ for i, s in enumerate(switches):
         """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. 图表可视化：直观展现背离（DIX/GEX 趋势图表）
+# 5. 图表可视化与纳指引擎
 # -----------------------------------------------------------------------------
+st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
+
+@st.cache_data(ttl=1800)
+def fetch_ndx_chart_data():
+    return yf.download('^NDX', period='3mo', progress=False)
+
+ndx_data = fetch_ndx_chart_data()
+if not ndx_data.empty:
+    fig_ndx = go.Figure()
+    
+    # K 线图
+    fig_ndx.add_trace(go.Candlestick(
+        x=ndx_data.index, open=ndx_data['Open'], high=ndx_data['High'],
+        low=ndx_data['Low'], close=ndx_data['Close'], name='NDX'
+    ))
+    
+    # 标注图纸上的关键线位和区间
+    fig_ndx.add_hline(y=28830, line_dash="solid", line_color="#2c3e50", annotation_text="静态收盘参考位 (28,830)", annotation_position="top right")
+    fig_ndx.add_hline(y=28500, line_dash="dash", line_color="#e74c3c", annotation_text="CTA 二次抛售加速位 (28,500)", annotation_position="bottom right")
+    fig_ndx.add_hline(y=26500, line_dash="dash", line_color="#c0392b", annotation_text="极端下影/二次冲洗 (26,500)", annotation_position="bottom right")
+    
+    # 核心承接区 (27200 - 28000)
+    fig_ndx.add_hrect(
+        y0=27200, y1=28000, line_width=0, fillcolor="#2ecc71", opacity=0.15,
+        annotation_text="核心承接区 (27,200 - 28,000)", annotation_position="inside top right"
+    )
+
+    fig_ndx.update_layout(
+        title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演",
+        template="plotly_white",
+        yaxis_title="NDX Index Points",
+        xaxis_rangeslider_visible=False,
+        height=500,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    st.plotly_chart(fig_ndx, use_container_width=True)
+
+
 st.markdown("### 📈 机构吸筹/派发量化趋势观测")
 if not sm_data["error"] and "df" in sm_data:
     plot_df = sm_data["df"]
@@ -418,14 +453,12 @@ if not sm_data["error"] and "df" in sm_data:
         go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5, dash='dot')),
         secondary_y=True,
     )
-    fig.update_layout(title_text="DIX (机构吸筹>=45 vs 派发<40) 与做市商 GEX 双向变动曲线", template="plotly_white")
+    fig.update_layout(title_text="DIX (机构吸筹>=45 vs 派发<40) 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
     fig.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
     fig.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("""
 ---
-💡 **Sentinel 2.0 资金逻辑逃顶避险小贴士**：
-1. **看懂 K 线背后的广度死穴**：当标普500指数每天微涨，而你发现 **SPY/RSP 比率** 却如同陡峭的火箭般飙升，请立刻警惕。这说明绝大多数中小个股已经提前失血破位，属于强烈的**假牛市、真派发**特征。
-2. **配合个股诊断模型**：当逃顶风控激活数 $\ge 4$ 时，个股诊断模型给出的高估标的应绝不留恋，立刻止盈；对于符合买入标准的标的，也要将止损点卡得极其严苛，甚至采用防守性空仓策略。
-""")
+💡 **Sentinel 2.0 资金逻辑综合实战指南**：
+1. **看懂 K 线背后的广度死穴**：当标普500每天微涨，而你发现 **SPY/RSP 比率** 飙升，结合开关6预警，这说明中小个股已提前失血，属于典型的**假牛市、真
