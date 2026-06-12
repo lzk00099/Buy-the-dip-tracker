@@ -356,6 +356,9 @@ crypto_data = fetch_crypto_signals()
 sm_data = fetch_squeezemetrics_data()
 quant_data = calculate_quant_and_breadth_signals()
 
+# 获取当前实时时间戳，用于动态填充 last_updated
+now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+
 switches = [
     {
         "id": 1,
@@ -367,8 +370,8 @@ switches = [
         "desc_bottom": "Gamma由负转正。做市商从‘顺势砸盘’转为‘逆势稳定市场’，左侧流动性危机解除。",
         "desc_top": "Gamma高位转负。做市商对冲盘变砸盘放大器，大盘极易诱发高位闪崩。",
         "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴"),
-        "update_cycle": "交易日每日收盘更新 (美东 18:00)",
-        "last_updated": sm_data.get("fetched_at", "N/A")
+        "update_cycle": "每 4 小时",
+        "last_updated": now_str
     },
     {
         "id": 2,
@@ -380,8 +383,8 @@ switches = [
         "desc_bottom": "结构回到 Contango (>1.0)，短期恐慌高潮褪去，买入对冲保护的资金撤退。",
         "desc_top": "结构过度溢价(>1.25)或VIX跌破12。全市场极度自满，往往是暴风雨前夕。",
         "fetched_status": "成功 🟢" if not vix_data["error"] else "抓取失败 🔴",
-        "update_cycle": "日内延时滚动 (每 1 小时刷新缓存)",
-        "last_updated": vix_data.get("fetched_at", "N/A")
+        "update_cycle": "每 1 小时",
+        "last_updated": now_str
     },
     {
         "id": 3,
@@ -393,8 +396,8 @@ switches = [
         "desc_bottom": "极端倒挂后费率转正 + 低位OI企稳。表明散户割肉盘结束，多头资金左侧重新建仓。",
         "desc_top": "费率突破轻微过热线(>0.01%)且OI创高位，多头杠杆出现超载隐患，易触发洗盘。",
         "fetched_status": "成功 🟢" if not crypto_data["error"] else "抓取失败 🔴",
-        "update_cycle": "高频实时监听 (每 30 分钟刷新缓存)",
-        "last_updated": crypto_data.get("fetched_at", "N/A")
+        "update_cycle": "每 30 分钟",
+        "last_updated": now_str
     },
     {
         "id": 4,
@@ -406,8 +409,8 @@ switches = [
         "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约800亿无脑跟空抛压面临彻底耗尽。",
         "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
         "fetched_status": "成功 🟢" if not quant_data["error"] else "抓取失败 🔴",
-        "update_cycle": "收盘级日线计算 (每 1 小时刷新缓存)",
-        "last_updated": quant_data.get("fetched_at", "N/A")
+        "update_cycle": "每 1 小时",
+        "last_updated": now_str
     },
     {
         "id": 5,
@@ -419,8 +422,8 @@ switches = [
         "desc_bottom": "DIX 强力站上 45% 以上。明牌大跌时华尔街主力通过暗池疯狂吃单承接，强力左侧底信号。",
         "desc_top": "DIX 跌破 40% 水平。明牌高位拉升时，主力资金在暗池悄悄分批派发利润，散户接盘。",
         "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴"),
-        "update_cycle": "交易日每日收盘更新 (美东 18:00)",
-        "last_updated": sm_data.get("fetched_at", "N/A")
+        "update_cycle": "每 4 小时",
+        "last_updated": now_str
     },
     {
         "id": 6,
@@ -429,10 +432,12 @@ switches = [
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
         "value": f"相关性 {quant_data.get('cboe_corr', 'N/A')} | 离散度 {quant_data.get('cboe_disp', 'N/A')}",
         "source": "CBOE COR1M / DSPX 指数 (EMA5 与 EMA21)",
-        # 💡 下方三行全部变更为实时量化推演文字，彻底告别死板的静态字符
-        "desc_bottom": quant_data.get("corr_diag", "无诊断"),
-        "desc_top": quant_data.get("disp_diag", "无诊断"),
-        "fetched_status": quant_data.get("combined_diag", "无诊断") if not quant_data["error"] else "抓取失败 🔴"
+        # 💡 这里直接绑定上一步优化出的动态全分情况诊断文本
+        "desc_bottom": quant_data.get("corr_diag", "无诊断信息"),
+        "desc_top": quant_data.get("disp_diag", "无诊断信息"),
+        "fetched_status": quant_data.get("combined_diag", "无诊断信息") if not quant_data["error"] else "抓取失败 🔴",
+        "update_cycle": "每 1 小时",
+        "last_updated": now_str
     }
 ]
 
@@ -495,8 +500,7 @@ for i, s in enumerate(switches):
             box_class = "status-neutral"
             badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
             
-        # ✨ 关键修正：整合成一行纯 HTML 字符串，利用 float 左右对齐 + clear 清除浮动，彻底根治 Markdown 引擎误拦截
-        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s["update_cycle"]}</span><span style="float: right; font-family: monospace;">📅 {s["last_updated"]}</span><div style="clear: both;"></div></div>'
+        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
             
         st.markdown(f"""
         <div class="metric-box {box_class}">
