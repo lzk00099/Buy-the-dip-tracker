@@ -41,22 +41,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. 数据获取与处理模块 (Data Pipeline)
+# 2. 增强版数据获取与处理模块 (Data Pipeline)
 # -----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """开关2：获取VIX期限结构（保留历史序列）"""
+    """开关2：获取VIX期限结构（扩充历史至3个月以支持绘图）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
-        hist = tickers.history(period='3mo')  # 扩大周期以便绘制日线变化
+        hist = tickers.history(period='3mo')  
         if not hist.empty and 'Close' in hist.columns:
             close_data = hist['Close'].ffill().copy()
             close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
             
             vix = close_data['^VIX'].iloc[-1]
             vix3m = close_data['^VIX3M'].iloc[-1]
-            ratio = close_data['Ratio'].iloc[-1]
+            
+            if np.isnan(vix):
+                vix = close_data['^VIX'].dropna().iloc[-1]
+            if np.isnan(vix3m):
+                vix3m = close_data['^VIX3M'].dropna().iloc[-1]
+                
+            ratio = vix3m / vix
             
             bottom_active = ratio > 1.0  # 回到 Contango 视为抄底信号之一
             top_active = vix < 12.0 or ratio > 1.25  # 极端自满
@@ -64,7 +70,7 @@ def fetch_vix_data():
             return {
                 "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3),
                 "bottom_active": bottom_active, "top_active": top_active, "error": False,
-                "df": close_data.tail(60)  # 返回最近60个交易日的数据
+                "df": close_data.tail(60)  # 返回最近60个交易日的数据供画图
             }
     except Exception as e:
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False}
@@ -72,7 +78,7 @@ def fetch_vix_data():
 
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
-    """开关3：获取加密货币资产永续合约资金费率与OI趋势（包含近期历史）"""
+    """开关3：获取加密货币资产永续合约资金费率与OI趋势（调整过热阈值为0.01%）"""
     try:
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
@@ -89,7 +95,7 @@ def fetch_crypto_signals():
         open_interest = float(oi_res['data'][0]['oiCcy'])
         
         bottom_active = funding_rate >= 0.0  # 费率转正表示情绪企稳
-        top_active = funding_rate >= 0.035  # 杠杆过载
+        top_active = funding_rate >= 0.01  # 💡 核心微调：杠杆过载指标由0.035下调至0.01
         
         # 抓取近期历史资金费率以供绘图
         hist_df = None
@@ -103,7 +109,7 @@ def fetch_crypto_signals():
                 hist_df['fundingRate'] = hist_df['fundingRate'].astype(float) * 100
                 hist_df = hist_df.sort_values('fundingTime')
         except:
-            pass  # 保证主接口挂了历史图表不会直接 crash 页面
+            pass  
         
         return {
             "funding_rate": f"{funding_rate:.4f}%", "oi": f"{open_interest:,.0f}",
@@ -163,6 +169,7 @@ def fetch_squeezemetrics_data():
         except Exception:
             pass
 
+    # Mock兜底数据
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates, 'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,
@@ -186,6 +193,7 @@ def fetch_cboe_official_history(symbol):
         }
         df = pd.read_csv(url)
         df.columns = df.columns.str.lower()
+        
         date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
         df['date'] = pd.to_datetime(df[date_col])
         df.set_index('date', inplace=True)
@@ -196,7 +204,7 @@ def fetch_cboe_official_history(symbol):
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """大盘 ETF 与 CBOE 官方数据混合对齐引擎（历史序列输出）"""
+    """升级版：大盘 ETF 与 CBOE 官方数据混合对齐引擎（升级历史矩阵导出）"""
     try:
         yf_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
         yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
@@ -225,7 +233,7 @@ def calculate_quant_and_breadth_signals():
             dspx_series = yf_data['^DSPX']
 
         # ---------------------------------------------------------------------
-        # 开关4：CTA 动向追踪 (历史日线级别阵列演算)
+        # 开关4：升级版 CTA 动向追踪 (升级为全历史序列向量化演算以供图表渲染)
         # ---------------------------------------------------------------------
         cta_shorts_series = pd.Series(0, index=data.index)
         cta_longs_series = pd.Series(0, index=data.index)
@@ -236,7 +244,6 @@ def calculate_quant_and_breadth_signals():
             ma63 = price.rolling(63).mean()
             ma126 = price.rolling(126).mean()
             
-            # 向量化计算每日的偏离极值
             short_mask = (price < ma21) & (price < ma63) & (price < ma126) & ((price - ma21) / ma21 < -0.04)
             long_mask = (price > ma21) & (price > ma63) & (price > ma126) & ((price - ma21) / ma21 > 0.04)
             
@@ -285,7 +292,7 @@ def calculate_quant_and_breadth_signals():
         
         spy_rsp_ratio = latest['SPY'] / latest['RSP']
         
-        # 统合历史序列输出
+        # 统合导出历史对齐DataFrame
         df_hist = pd.DataFrame(index=data.index)
         df_hist['corr'] = corr_series
         df_hist['corr_fast'] = corr_fast
@@ -307,7 +314,7 @@ def calculate_quant_and_breadth_signals():
             "corr_bottom_active": corr_bottom_active,
             "breadth_top_active": breadth_top_active,
             "corr_is_broken": corr_is_broken,
-            "df_hist": df_hist.tail(60)  # 取最近60天对齐
+            "df_hist": df_hist.tail(60)
         }
     except Exception as e:
         return {
@@ -355,7 +362,7 @@ switches = [
         "value": f"资金费率: {crypto_data.get('funding_rate', 'N/A')} | OI: {crypto_data.get('oi', 'N/A')}",
         "source": "OKX 永续合约 API",
         "desc_bottom": "极端倒挂后费率转正 + 低位OI企稳。表明散户割肉盘结束，多头资金左侧重新建仓。",
-        "desc_top": "费率极其亢奋(>0.035%)且OI创历史高位，多头杠杆过载，易触发连环清算。",
+        "desc_top": "费率突破轻微过热线(>0.01%)且OI创高位，多头杠杆出现超载隐患，易触发洗盘。",
         "fetched_status": "成功 🟢" if not crypto_data["error"] else "抓取失败 🔴"
     },
     {
@@ -410,7 +417,6 @@ with c1:
 with c2:
     st.metric(label="🚨 见顶风控激活数 (提前逃顶信号)", value=f"{top_score} / 6", delta="-触发高位逃顶线" if top_score >= 4 else "处于安全健康牛市", delta_color="inverse")
 
-# 综合诊断与微观执行端联动提示
 if top_score >= 4:
     status_color = "red"
     action_title = "🚨 【红色暴风雨：触发全面防守逃顶线】"
@@ -521,80 +527,68 @@ if not ndx_data.empty:
     st.plotly_chart(fig_ndx, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 6. 近期日线级别定量跟踪雷达 (全开关整合，并排重构版)
+# 6. 近期日线级别定量监控图表（🔥 整合重构入口）
 # -----------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
 
-# 重新组装大盘监控开关的五大标签页，将 DIX/GEX 纳入为第一个标签
+# 创建统一的 TABS 开关切换
 tab1_5, tab2, tab3, tab4, tab6 = st.tabs([
-    "📈 开关1&5: 暗池 DIX 与做市商 GEX",
-    "📊 开关2: VIX 期限结构变动", 
+    "🐳 开关1 & 5: 机构暗池 DIX & GEX 敞口",
+    "📊 开关2: VIX 期限结构趋势", 
     "₿ 开关3: 加密离岸高杠杆费率", 
     "🤖 开关4: CTA 动量极值矩阵", 
-    "🔄 开关6: 隐含相关性与离散度拐点"
+    "🔄 开关6: 隐含相关性与离散度"
 ])
 
-# --- TAB 1 & 5: 暗池 DIX 与做市商 GEX (重构为并排独立轴双图) ---
+# --- TAB 1 & 5: 暗池 DIX & GEX (按原代码照搬至此) ---
 with tab1_5:
     if not sm_data["error"] and "df" in sm_data:
         plot_df = sm_data["df"]
-        c1_col1, c1_col2 = st.columns(2)
-        
-        with c1_col1:
-            fig_dix = go.Figure()
-            fig_dix.add_trace(go.Scatter(
-                x=plot_df['date'], y=plot_df['dix'], 
-                name="暗池 DIX (%)", line=dict(color="#3498db", width=2)
-            ))
-            fig_dix.add_hline(y=45.0, line_dash="dash", line_color="#2ecc71", annotation_text="主力强力吸筹线 (45%)")
-            fig_dix.add_hline(y=40.0, line_dash="dash", line_color="#e74c3c", annotation_text="散户接盘派发线 (40%)")
-            fig_dix.update_layout(
-                title_text="CBOE 暗池 DIX 指数历史吸筹/派发量化趋势", 
-                template="plotly_white", height=380,
-                yaxis=dict(title="DIX 比例 (%)")
-            )
-            st.plotly_chart(fig_dix, use_container_width=True)
-            
-        with c1_col2:
-            fig_gex = go.Figure()
-            fig_gex.add_trace(go.Scatter(
-                x=plot_df['date'], y=plot_df['gex'], 
-                name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5)
-            ))
-            fig_gex.add_hline(y=0, line_dash="solid", line_color="#7f8c8d", annotation_text="GEX 零界点 (正/负 Gamma 墙)")
-            fig_gex.update_layout(
-                title_text="做市商 GEX 净敞口历史变动 (判断流动性踩踏/稳定器)", 
-                template="plotly_white", height=380,
-                yaxis=dict(title="Gamma 敞口绝对值")
-            )
-            st.plotly_chart(fig_gex, use_container_width=True)
+        fig_sm = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_sm.add_trace(
+            go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="暗池 DIX (%)", line=dict(color="#3498db", width=2)),
+            secondary_y=False,
+        )
+        fig_sm.add_trace(
+            go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5, dash='dot')),
+            secondary_y=True,
+        )
+        fig_sm.update_layout(title_text="DIX (机构吸筹>=45 vs 派发<40) 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
+        fig_sm.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
+        fig_sm.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
+        st.plotly_chart(fig_sm, use_container_width=True)
     else:
-        st.warning("暗池与 Gamma 历史数据管道未就绪。")
+        st.warning("暗池及 Gamma 追踪管道数据不可用。")
 
-# --- TAB 2: VIX 期限结构趋势 ---
+# --- TAB 2: VIX 拆分为单开关下的 2 个 Chart ---
 with tab2:
     if not vix_data["error"] and "df" in vix_data:
         v_df = vix_data["df"]
-        fig_vix = make_subplots(specs=[[{"secondary_y": True}]])
-        fig_vix.add_trace(
-            go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2)),
-            secondary_y=False
-        )
-        fig_vix.add_trace(
-            go.Scatter(x=v_df.index, y=v_df['Ratio'], name="VIX3M / VIX 比率", line=dict(color="#9b59b6", width=2, dash='solid')),
-            secondary_y=True
-        )
-        fig_vix.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", secondary_y=True, annotation_text="Contango 临界线 (1.0)")
-        fig_vix.add_hline(y=1.25, line_dash="dash", line_color="#e74c3c", secondary_y=True, annotation_text="极端亢奋线 (1.25)")
-        fig_vix.update_layout(title_text="VIX 现货波动率 vs 期限结构比率 (日线回溯)", template="plotly_white", height=400)
-        fig_vix.update_yaxes(title_text="VIX Index", secondary_y=False)
-        fig_vix.update_yaxes(title_text="VIX3M / VIX Ratio", secondary_y=True)
-        st.plotly_chart(fig_vix, use_container_width=True)
+        v_col1, v_col2 = st.columns(2)
+        
+        with v_col1:
+            fig_vix_spot = go.Figure()
+            fig_vix_spot.add_trace(
+                go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2))
+            )
+            fig_vix_spot.add_hline(y=12.0, line_dash="dash", line_color="#c0392b", annotation_text="极端自满安全阈值 (12.0)")
+            fig_vix_spot.update_layout(title_text="图表 A: VIX 现货恐慌指数趋势（低值警戒自满）", template="plotly_white", height=400, yaxis=dict(title="VIX Index"))
+            st.plotly_chart(fig_vix_spot, use_container_width=True)
+            
+        with v_col2:
+            fig_vix_ratio = go.Figure()
+            fig_vix_ratio.add_trace(
+                go.Scatter(x=v_df.index, y=v_df['Ratio'], name="VIX3M / VIX 比率", line=dict(color="#9b59b6", width=2))
+            )
+            fig_vix_ratio.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", annotation_text="Contango 临界线 (1.0)")
+            fig_vix_ratio.add_hline(y=1.25, line_dash="dash", line_color="#e74c3c", annotation_text="极端自满线 (1.25)")
+            fig_vix_ratio.update_layout(title_text="图表 B: VIX3M / VIX 期限结构比率（升水回踩追踪）", template="plotly_white", height=400, yaxis=dict(title="VIX3M / VIX Ratio"))
+            st.plotly_chart(fig_vix_ratio, use_container_width=True)
     else:
-        st.warning("VIX 历史数据管道未就绪。")
+        st.warning("VIX 历史期限数据未就绪。")
 
-# --- TAB 3: 加密离岸资金费率 ---
+# --- TAB 3: 加密离岸资金费率 (已下调阈值至0.01%) ---
 with tab3:
     if not crypto_data["error"] and crypto_data.get("hist_df") is not None:
         c_df = crypto_data["hist_df"]
@@ -603,8 +597,8 @@ with tab3:
             go.Scatter(x=c_df['fundingTime'], y=c_df['fundingRate'], name="BTC 永续合约资金费率 (%)", mode='lines+markers', line=dict(color="#f1c40f", width=2))
         )
         fig_crypto.add_hline(y=0.0, line_dash="solid", line_color="#7f8c8d", annotation_text="多空零界点")
-        fig_crypto.add_hline(y=0.035, line_dash="dash", line_color="#e74c3c", annotation_text="多头杠杆过载 (>0.035%)")
-        fig_crypto.update_layout(title_text="OKX BTC-USDT-SWAP 近期资金费率变动区间 (%)", template="plotly_white", height=400, yaxis=dict(title="Funding Rate (%)"))
+        fig_crypto.add_hline(y=0.01, line_dash="dash", line_color="#e74c3c", annotation_text="多头杠杆过载边界 (>0.01%)")
+        fig_crypto.update_layout(title_text="OKX BTC-USDT-SWAP 历史资金费率（预警线已平移调整至0.01%）", template="plotly_white", height=400, yaxis=dict(title="Funding Rate (%)"))
         st.plotly_chart(fig_crypto, use_container_width=True)
     else:
         st.info("💡 正在实时监控当前费率，或 OKX 历史 API 触及限频，图表暂未加载。可刷新重试。")
@@ -655,5 +649,5 @@ st.markdown("""
 ---
 💡 **Sentinel 2.0 资金逻辑综合实战指南**：
 1. **看懂 K 线背后的广度死穴**：当标普500每天微涨，而你发现 **SPY/RSP 比率** 飙升，结合开关6预警，这说明中小个股已提前失血，属于典型的**假牛市、真派发**。
-2. **结合你的微观诊断系统**：大盘底部得分 >= 4 时，是利用你微观量化诊断模型计算个股 EV 最具性价比的时刻。大盘提供的系统性折价，能让模型筛选出的高胜率个股爆发出极强的正向期望收益。
+2. **结合你的微观诊断系统**：大盘底部得分 $\ge 4$ 时，是利用你微观量化诊断模型计算个股 EV 最具性价比的时刻。大盘提供的系统性折价，能让模型筛选出的高胜率个股爆发出极强的正向期望收益。
 """)
