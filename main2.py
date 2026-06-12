@@ -41,7 +41,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. 数据获取与处理模块 (Data Pipeline)
+# 2. 数据获取与处理模块 (Data Pipeline & Timestamp Injection)
 # -----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
@@ -69,11 +69,12 @@ def fetch_vix_data():
             return {
                 "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3),
                 "bottom_active": bottom_active, "top_active": top_active, "error": False,
-                "df": close_data.tail(60)
+                "df": close_data.tail(60),
+                "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
     except Exception as e:
-        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False}
-    return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False}
+        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
+    return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
 
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
@@ -82,19 +83,19 @@ def fetch_crypto_signals():
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
         if fr_res.get("code") != "0":
-            return {"error": True, "msg": "OKX API 异常", "bottom_active": False, "top_active": False}
+            return {"error": True, "msg": "OKX API 异常", "bottom_active": False, "top_active": False, "fetched_at": "API错误"}
             
         funding_rate = float(fr_res['data'][0]['fundingRate']) * 100
         
         oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
         oi_res = requests.get(oi_url, timeout=5).json()
         if oi_res.get("code") != "0":
-            return {"error": True, "msg": "获取 OI 数据异常", "bottom_active": False, "top_active": False}
+            return {"error": True, "msg": "获取 OI 数据异常", "bottom_active": False, "top_active": False, "fetched_at": "API错误"}
             
         open_interest = float(oi_res['data'][0]['oiCcy'])
         
         bottom_active = funding_rate >= 0.0  
-        top_active = funding_rate >= 0.01  # 💡 低迷期过热线降至 0.01%
+        top_active = funding_rate >= 0.01  
         
         hist_df = None
         try:
@@ -112,10 +113,11 @@ def fetch_crypto_signals():
         return {
             "funding_rate": f"{funding_rate:.4f}%", "oi": f"{open_interest:,.0f}",
             "bottom_active": bottom_active, "top_active": top_active, "error": False,
-            "hist_df": hist_df
+            "hist_df": hist_df,
+            "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     except Exception as e:
-        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False}
+        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "网络穿透异常"}
 
 @st.cache_data(ttl=3600)
 def fetch_squeezemetrics_data():
@@ -153,11 +155,15 @@ def fetch_squeezemetrics_data():
                 if dix_val < 1.0: dix_val = dix_val * 100
                 gex_val = float(latest['gex'])
                 
+                # 读取本地文件的真实修改时间作为数据的真实刷新标记
+                file_time = datetime.datetime.fromtimestamp(os.path.getmtime(cache_file)).strftime('%Y-%m-%d %H:%M:%S')
+                
                 return {
                     "dix": round(dix_val, 2), "gex": int(gex_val),
                     "dix_bottom_active": dix_val >= 45.0, "dix_top_active": dix_val < 40.0,
                     "gex_bottom_active": gex_val > 0, "gex_top_active": gex_val < 0,
-                    "error": False, "df": df.tail(100), "is_mock": False
+                    "error": False, "df": df.tail(100), "is_mock": False,
+                    "fetched_at": file_time
                 }
         except Exception:
             pass
@@ -172,7 +178,8 @@ def fetch_squeezemetrics_data():
         "dix": round(latest['dix'], 2), "gex": int(latest['gex']),
         "dix_bottom_active": latest['dix'] >= 45.0, "dix_top_active": latest['dix'] < 40.0,
         "gex_bottom_active": latest['gex'] > 0, "gex_top_active": latest['gex'] < 0,
-        "error": False, "df": mock_df, "is_mock": True
+        "error": False, "df": mock_df, "is_mock": True,
+        "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + " (兜底)"
     }
 
 @st.cache_data(ttl=14400)
@@ -193,7 +200,7 @@ def fetch_cboe_official_history(symbol):
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """混合对齐引擎 —— 💡 重构开关6线序排阵及大/小级别极端状态推演"""
+    """混合对齐引擎 —— 包含快慢线序阵形演算与底层时间锚定"""
     try:
         yf_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
         yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
@@ -247,9 +254,7 @@ def calculate_quant_and_breadth_signals():
         elif cta_top_active: cta_status_text = "系统性多头买盘枯竭"
         elif cta_shorts_exhausted > 0 or cta_longs_exhausted > 0: cta_status_text = "CTA 动量分化调仓期"
 
-        # ---------------------------------------------------------------------
-        # 💡 【重大更新】开关6：快/慢/现货相对位置及大级别状态计算
-        # ---------------------------------------------------------------------
+        # 开关6：快/慢/现货相对位置及大级别状态计算
         corr_is_broken = corr_series.tail(10).max() == corr_series.tail(10).min()
         corr_fast = corr_series.ewm(span=5, adjust=False).mean()
         corr_slow = corr_series.ewm(span=21, adjust=False).mean()
@@ -262,7 +267,6 @@ def calculate_quant_and_breadth_signals():
         c_val, c_f, c_s = corr_series.iloc[-1], corr_fast.iloc[-1], corr_slow.iloc[-1]
         d_val, d_f, d_s = dspx_series.iloc[-1], dsp_fast.iloc[-1], dsp_slow.iloc[-1]
         
-        # 向量化相对排列阵法计算
         def determine_line_order(val, fast, slow):
             labels = [("现货", val), ("快线", fast), ("慢线", slow)]
             labels.sort(key=lambda x: x[1], reverse=True)
@@ -271,15 +275,12 @@ def calculate_quant_and_breadth_signals():
         corr_pos_str = determine_line_order(c_val, c_f, c_s)
         dsp_pos_str = determine_line_order(d_val, d_f, d_s)
 
-        # 重新根据大/小级别回调与底部定义核心驱动状态
         market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
         
-        # 底部判定：隐含相关性拐点 (快线 < 慢线)
         corr_turning_down = c_f < c_s
         corr_large_bottom = corr_turning_down and (corr_slow.tail(15).max() > corr_q75.iloc[-1])
         corr_small_bottom = corr_turning_down and not corr_large_bottom
         
-        # 回调风险判定：个股离散度爆发 (快线 > 慢线)
         disp_breaking_up = d_f > d_s
         disp_large_correction = disp_breaking_up and (dspx_series.tail(15).max() > dspx_q75.iloc[-1]) and market_high
         disp_small_correction = disp_breaking_up and not disp_large_correction
@@ -326,17 +327,19 @@ def calculate_quant_and_breadth_signals():
             "corr_bottom_active": corr_bottom_active,
             "breadth_top_active": breadth_top_active,
             "corr_is_broken": corr_is_broken,
-            "df_hist": df_hist.tail(60)
+            "df_hist": df_hist.tail(60),
+            "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     except Exception as e:
         return {
             "error": True, "msg": str(e), 
             "cta_bottom_active": False, "cta_top_active": False,
-            "corr_bottom_active": False, "breadth_top_active": False
+            "corr_bottom_active": False, "breadth_top_active": False,
+            "fetched_at": "矩阵演算中断"
         }
 
 # -----------------------------------------------------------------------------
-# 3. 业务决策逻辑组装
+# 3. 业务决策逻辑组装与元数据解析
 # -----------------------------------------------------------------------------
 vix_data = fetch_vix_data()
 crypto_data = fetch_crypto_signals()
@@ -353,7 +356,9 @@ switches = [
         "source": "SqueezeMetrics (Proxy for SPX/NDX)",
         "desc_bottom": "Gamma由负转正。做市商从‘顺势砸盘’转为‘逆势稳定市场’，左侧流动性危机解除。",
         "desc_top": "Gamma高位转负。做市商对冲盘变砸盘放大器，大盘极易诱发高位闪崩。",
-        "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴")
+        "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴"),
+        "update_cycle": "交易日每日收盘更新 (美东 18:00)",
+        "last_updated": sm_data.get("fetched_at", "N/A")
     },
     {
         "id": 2,
@@ -364,7 +369,9 @@ switches = [
         "source": "CBOE 波动率曲线",
         "desc_bottom": "结构回到 Contango (>1.0)，短期恐慌高潮褪去，买入对冲保护的资金撤退。",
         "desc_top": "结构过度溢价(>1.25)或VIX跌破12。全市场极度自满，往往是暴风雨前夕。",
-        "fetched_status": "成功 🟢" if not vix_data["error"] else "抓取失败 🔴"
+        "fetched_status": "成功 🟢" if not vix_data["error"] else "抓取失败 🔴",
+        "update_cycle": "日内延时滚动 (每 1 小时刷新缓存)",
+        "last_updated": vix_data.get("fetched_at", "N/A")
     },
     {
         "id": 3,
@@ -375,7 +382,9 @@ switches = [
         "source": "OKX 永续合约 API",
         "desc_bottom": "极端倒挂后费率转正 + 低位OI企稳。表明散户割肉盘结束，多头资金左侧重新建仓。",
         "desc_top": "费率突破轻微过热线(>0.01%)且OI创高位，多头杠杆出现超载隐患，易触发洗盘。",
-        "fetched_status": "成功 🟢" if not crypto_data["error"] else "抓取失败 🔴"
+        "fetched_status": "成功 🟢" if not crypto_data["error"] else "抓取失败 🔴",
+        "update_cycle": "高频实时监听 (每 30 分钟刷新缓存)",
+        "last_updated": crypto_data.get("fetched_at", "N/A")
     },
     {
         "id": 4,
@@ -386,7 +395,9 @@ switches = [
         "source": "基于 1M/3M/6M 动量偏离度演算",
         "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约800亿无脑跟空抛压面临彻底耗尽。",
         "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
-        "fetched_status": "成功 🟢" if not quant_data["error"] else "抓取失败 🔴"
+        "fetched_status": "成功 🟢" if not quant_data["error"] else "抓取失败 🔴",
+        "update_cycle": "收盘级日线计算 (每 1 小时刷新缓存)",
+        "last_updated": quant_data.get("fetched_at", "N/A")
     },
     {
         "id": 5,
@@ -397,19 +408,22 @@ switches = [
         "source": "SqueezeMetrics 暗池吸筹/派发指数",
         "desc_bottom": "DIX 强力站上 45% 以上。明牌大跌时华尔街主力通过暗池疯狂吃单承接，强力左侧底信号。",
         "desc_top": "DIX 跌破 40% 水平。明牌高位拉升时，主力资金在暗池悄悄分批派发利润，散户接盘。",
-        "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴")
+        "fetched_status": "成功 🟢" if (not sm_data["error"] and not sm_data.get("is_mock", False)) else ("使用兜底数据 🟡" if sm_data.get("is_mock", False) else "抓取失败 🔴"),
+        "update_cycle": "交易日每日收盘更新 (美东 18:00)",
+        "last_updated": sm_data.get("fetched_at", "N/A")
     },
     {
         "id": 6,
         "name": "全局隐含相关性拐点与离散度爆发",
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
-        # 💡 页面彻底隐藏开关6的原始数值，直接展现计算好的线序阵形
         "value": f"相关性线序: {quant_data.get('corr_pos', 'N/A')} | 离散度线序: {quant_data.get('dsp_pos', 'N/A')}",
         "source": "CBOE COR1M / DSPX 指数矩阵定位",
         "desc_bottom": f"当前状态: {quant_data.get('corr_tier', 'N/A')}",
         "desc_top": f"当前状态: {quant_data.get('disp_tier', 'N/A')}",
-        "fetched_status": "成功 🟢" if (not quant_data["error"] and not quant_data.get("corr_is_broken", False)) else ("历史断流 ⚠️" if quant_data.get("corr_is_broken", False) else "抓取失败 🔴")
+        "fetched_status": "成功 🟢" if (not quant_data["error"] and not quant_data.get("corr_is_broken", False)) else ("历史断流 ⚠️" if quant_data.get("corr_is_broken", False) else "抓取失败 🔴"),
+        "update_cycle": "收盘级日线计算 (每 1 小时刷新缓存)",
+        "last_updated": quant_data.get("fetched_at", "N/A")
     }
 ]
 
@@ -420,7 +434,7 @@ top_score = sum([1 for s in switches if s["top_active"]])
 # 4. Streamlit UI 界面绘制
 # -----------------------------------------------------------------------------
 st.title("🛡️ Sentinel 2.0 核心决策系统：大盘底层资金双向雷达")
-st.subheader(f"数据实时快照: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.subheader(f"看板渲染时钟: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 st.markdown("### 📊 综合大盘多空状态与量化应对措施")
 c1, c2 = st.columns(2)
@@ -434,7 +448,7 @@ if top_score >= 4:
     status_color = "red"
     action_title = "🚨 【红色暴风雨：触发全面防守逃顶线】"
     action_text = (
-        "**底层逻辑演算**：市场表象繁荣，但 CBOE 离散度已形成大级别或小级别的高位撕裂。CTA 多头追随动能面临衰减。"
+        "**底层逻辑演算**：市场表象繁荣，但 CBOE 离散度已形成撕裂。CTA 多头追随动能面临衰减。"
         "必须**全面收紧个股诊断模型的止盈线**，多头战略转为全面防守、保住利润阶段。"
     )
 elif bottom_score >= 4:
@@ -442,7 +456,7 @@ elif bottom_score >= 4:
     action_title = "🚀 【绿色共振：泥沙俱下恐慌耗尽，触发拐点重仓抄底】"
     action_text = (
         "**底层逻辑演算**：黄金左侧大底或波段反弹底确立！CBOE 隐含相关性确立快线死叉慢线回落，宣告流动性践踏结束。<br><br>"
-        "**应对措施**：多头精准抄底模式全面启动。可开启个股诊断模型输入最多 5 只目标 Tickers，利用 Random Forest 和 EV 模型精准卡位。"
+        "**应对措施**：多头精准抄底模式全面启动。利用 Expected Value 与 Random Forest 模型对目标个股进行诊断捕捉。"
     )
 else:
     status_color = "orange"
@@ -484,6 +498,11 @@ for i, s in enumerate(switches):
             <p style="margin: 4px 0; font-size:9.5pt; line-height:1.4;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{s['desc_bottom']}</span></p>
             <p style="margin: 4px 0; font-size:9.5pt; line-height:1.4;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{s['desc_top']}</span></p>
             <p style="margin: 5px 0 0 0; color: #7f8c8d; font-size: 8.5pt;">🧭 数据来源: {s['source']}</p>
+            
+            <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed #e0e0e0; display: flex; justify-content: space-between; font-size: 8.5pt; color: #7f8c8d;">
+                <span>⏱️ {s['update_cycle']}</span>
+                <span style="font-family: monospace;">📅 {s['last_updated']}</span>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -612,7 +631,7 @@ with tab4:
         fig_cta.update_layout(title_text="CTA 量化追踪：多/空头趋势耗尽历史得分", template="plotly_white", height=400)
         st.plotly_chart(fig_cta, use_container_width=True)
 
-# --- TAB 6 (快慢线可视化) ---
+# --- TAB 6 ---
 with tab6:
     if not quant_data["error"] and "df_hist" in quant_data:
         h_df = quant_data["df_hist"]
