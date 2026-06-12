@@ -486,6 +486,9 @@ for i, s in enumerate(switches):
             box_class = "status-neutral"
             badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
             
+        # ✨ 关键修正：整合成一行纯 HTML 字符串，利用 float 左右对齐 + clear 清除浮动，彻底根治 Markdown 引擎误拦截
+        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s["update_cycle"]}</span><span style="float: right; font-family: monospace;">📅 {s["last_updated"]}</span><div style="clear: both;"></div></div>'
+            
         st.markdown(f"""
         <div class="metric-box {box_class}">
             <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -498,11 +501,7 @@ for i, s in enumerate(switches):
             <p style="margin: 4px 0; font-size:9.5pt; line-height:1.4;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{s['desc_bottom']}</span></p>
             <p style="margin: 4px 0; font-size:9.5pt; line-height:1.4;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{s['desc_top']}</span></p>
             <p style="margin: 5px 0 0 0; color: #7f8c8d; font-size: 8.5pt;">🧭 数据来源: {s['source']}</p>
-            
-            <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed #e0e0e0; display: flex; justify-content: space-between; font-size: 8.5pt; color: #7f8c8d;">
-                <span>⏱️ {s['update_cycle']}</span>
-                <span style="font-family: monospace;">📅 {s['last_updated']}</span>
-            </div>
+            {metadata_line}
         </div>
         """, unsafe_allow_html=True)
 
