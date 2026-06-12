@@ -46,7 +46,7 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """开关2：获取VIX期限结构数据"""
+    """开关2：升级版 - 五级区间波幅动态诊断引擎（支持中性提示与极值硬激活）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
         hist = tickers.history(period='3mo')  
@@ -57,18 +57,49 @@ def fetch_vix_data():
             vix = close_data['^VIX'].iloc[-1]
             vix3m = close_data['^VIX3M'].iloc[-1]
             
-            if np.isnan(vix):
-                vix = close_data['^VIX'].dropna().iloc[-1]
-            if np.isnan(vix3m):
-                vix3m = close_data['^VIX3M'].dropna().iloc[-1]
+            if np.isnan(vix): vix = close_data['^VIX'].dropna().iloc[-1]
+            if np.isnan(vix3m): vix3m = close_data['^VIX3M'].dropna().iloc[-1]
                 
             ratio = vix3m / vix
-            bottom_active = ratio > 1.0  
-            top_active = vix < 12.0 or ratio > 1.25  
+            
+            # --- 核心升级：五级区间推演决策算法 ---
+            bottom_active = False
+            top_active = False
+            
+            if vix > 32.0 or ratio < 0.88:
+                # [状态 5] 极端恐慌/系统性出清 (触发抄底开关)
+                bottom_active = True
+                vix_diag_status = "🚨 极值激活：系统性恐慌出清"
+                vix_desc_bottom = f"【系统流动性踩踏】VIX({vix:.2f})飙升破32，期限比率({ratio:.3f})深陷倒挂。多头左侧黄金捡尸点。"
+                vix_desc_top = "恐慌极度释放，空头动能面临极值耗尽，空头随时准备爆仓。"
+            elif (24.0 <= vix <= 32.0) or (0.88 <= ratio < 0.98):
+                # [状态 4] 高位恐慌/波段调整 (维持中性，给予抄底提示)
+                vix_diag_status = "🟡 中性提示：波段调整蓄势"
+                vix_desc_bottom = f"【情绪开始恐慌】VIX进入24-32防御区间，期限结构倒挂。进入密切观察期，暂不计入共振总分。"
+                vix_desc_top = "大盘广度承压，波动率快浪处于拉升通道，不盲目猜底。"
+            elif vix < 11.5 or ratio > 1.28:
+                # [状态 1] 极端自满/多头赶顶 (触发见顶开关)
+                top_active = True
+                vix_diag_status = "🚨 极值激活：市场极度自满顶"
+                vix_desc_bottom = "多头过于拥挤，波动率期权买权（Put）被踩踏式无脑抛售。"
+                vix_desc_top = f"【波动率冰点】VIX({vix:.2f})跌破11.5或期限比({ratio:.3f})超载。短波动率策略极度拥挤，警惕闪崩。"
+            elif (11.5 <= vix < 13.5) or (1.22 <= ratio <= 1.28):
+                # [状态 2] 低波麻木/高位预警 (维持中性，给予高位预警)
+                vix_diag_status = "🟡 中性预警：自满风控隐患"
+                vix_desc_bottom = "大盘高位滞涨横盘，期权卖方资金持续沉淀挤压。"
+                vix_desc_top = f"【自满防御期】VIX处于11.5-13.5历史低位。多头动能收窄，建议个股收紧止盈线，暂不计入共振总分。"
+            else:
+                # [状态 3] 常态运行/均衡状态
+                vix_diag_status = "🟢 状态中性：健康均衡牛市"
+                vix_desc_bottom = f"【平衡状态】当前VIX({vix:.2f})处于13.5-24健康震荡区间。"
+                vix_desc_top = f"【结构稳定】期限比率({ratio:.3f})处于Contango常态，大盘无系统性尾部尾部突变风险。"
             
             return {
                 "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3),
                 "bottom_active": bottom_active, "top_active": top_active, "error": False,
+                "vix_diag_status": vix_diag_status,
+                "vix_desc_bottom": vix_desc_bottom,
+                "vix_desc_top": vix_desc_top,
                 "df": close_data.tail(60),
                 "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -380,9 +411,10 @@ switches = [
         "top_active": vix_data["top_active"] if not vix_data["error"] else False,
         "value": f"VIX3M/VIX 比率: {vix_data.get('ratio', 'N/A')} | VIX: {vix_data.get('vix', 'N/A')}",
         "source": "CBOE 波动率曲线",
-        "desc_bottom": "结构回到 Contango (>1.0)，短期恐慌高潮褪去，买入对冲保护的资金撤退。",
-        "desc_top": "结构过度溢价(>1.25)或VIX跌破12。全市场极度自满，往往是暴风雨前夕。",
-        "fetched_status": "成功 🟢" if not vix_data["error"] else "抓取失败 🔴",
+        # 💡 下方三行全面切换为实时推演出来的五级文本，拒绝死板
+        "desc_bottom": vix_data.get("vix_desc_bottom", "无诊断信息"),
+        "desc_top": vix_data.get("vix_desc_top", "无诊断信息"),
+        "fetched_status": vix_data.get("vix_diag_status", "抓取失败 🔴") if not vix_data["error"] else "抓取失败 🔴",
         "update_cycle": "每 1 小时",
         "last_updated": now_str
     },
