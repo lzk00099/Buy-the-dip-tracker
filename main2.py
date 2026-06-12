@@ -520,36 +520,57 @@ if not ndx_data.empty:
     )
     st.plotly_chart(fig_ndx, use_container_width=True)
 
-
-st.markdown("### 📈 机构吸筹/派发量化趋势观测 (开关 1 & 5)")
-if not sm_data["error"] and "df" in sm_data:
-    plot_df = sm_data["df"]
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(
-        go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="暗池 DIX (%)", line=dict(color="#3498db", width=2)),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5, dash='dot')),
-        secondary_y=True,
-    )
-    fig.update_layout(title_text="DIX (机构吸筹>=45 vs 派发<40) 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
-    fig.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
-    fig.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
-    st.plotly_chart(fig, use_container_width=True)
-
 # -----------------------------------------------------------------------------
-# 6. 近期日线级别定量跟踪雷达 (开关 2, 3, 4, 6)
+# 6. 近期日线级别定量跟踪雷达 (全开关整合，并排重构版)
 # -----------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
 
-tab2, tab3, tab4, tab6 = st.tabs([
+# 重新组装大盘监控开关的五大标签页，将 DIX/GEX 纳入为第一个标签
+tab1_5, tab2, tab3, tab4, tab6 = st.tabs([
+    "📈 开关1&5: 暗池 DIX 与做市商 GEX",
     "📊 开关2: VIX 期限结构变动", 
     "₿ 开关3: 加密离岸高杠杆费率", 
     "🤖 开关4: CTA 动量极值矩阵", 
     "🔄 开关6: 隐含相关性与离散度拐点"
 ])
+
+# --- TAB 1 & 5: 暗池 DIX 与做市商 GEX (重构为并排独立轴双图) ---
+with tab1_5:
+    if not sm_data["error"] and "df" in sm_data:
+        plot_df = sm_data["df"]
+        c1_col1, c1_col2 = st.columns(2)
+        
+        with c1_col1:
+            fig_dix = go.Figure()
+            fig_dix.add_trace(go.Scatter(
+                x=plot_df['date'], y=plot_df['dix'], 
+                name="暗池 DIX (%)", line=dict(color="#3498db", width=2)
+            ))
+            fig_dix.add_hline(y=45.0, line_dash="dash", line_color="#2ecc71", annotation_text="主力强力吸筹线 (45%)")
+            fig_dix.add_hline(y=40.0, line_dash="dash", line_color="#e74c3c", annotation_text="散户接盘派发线 (40%)")
+            fig_dix.update_layout(
+                title_text="CBOE 暗池 DIX 指数历史吸筹/派发量化趋势", 
+                template="plotly_white", height=380,
+                yaxis=dict(title="DIX 比例 (%)")
+            )
+            st.plotly_chart(fig_dix, use_container_width=True)
+            
+        with c1_col2:
+            fig_gex = go.Figure()
+            fig_gex.add_trace(go.Scatter(
+                x=plot_df['date'], y=plot_df['gex'], 
+                name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5)
+            ))
+            fig_gex.add_hline(y=0, line_dash="solid", line_color="#7f8c8d", annotation_text="GEX 零界点 (正/负 Gamma 墙)")
+            fig_gex.update_layout(
+                title_text="做市商 GEX 净敞口历史变动 (判断流动性踩踏/稳定器)", 
+                template="plotly_white", height=380,
+                yaxis=dict(title="Gamma 敞口绝对值")
+            )
+            st.plotly_chart(fig_gex, use_container_width=True)
+    else:
+        st.warning("暗池与 Gamma 历史数据管道未就绪。")
 
 # --- TAB 2: VIX 期限结构趋势 ---
 with tab2:
@@ -600,7 +621,6 @@ with tab4:
             go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头枯竭得分 (QQQ/SPY/IWM 累计超买)", mode='lines', line=dict(color="#2ecc71", width=2.5))
         )
         fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极端拐点激活线 (得分为 2)")
-        # 🛠️ 核心修复处：已将 yaxes 改为正确的 yaxis 属性
         fig_cta.update_layout(title_text="CTA 量化追踪：大盘三大 ETF 指数多/空头趋势耗尽历史得分", template="plotly_white", height=400, yaxis=dict(title="激活分值 (0-3)", tickvals=[0, 1, 2, 3]))
         st.plotly_chart(fig_cta, use_container_width=True)
     else:
