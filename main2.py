@@ -593,7 +593,6 @@ with tab4:
     if not quant_data["error"] and "df_hist" in quant_data:
         h_df = quant_data["df_hist"]
         fig_cta = go.Figure()
-        # 🟢 此处已成功移除错误的 stackg_group 参数
         fig_cta.add_trace(
             go.Scatter(x=h_df.index, y=h_df['cta_shorts'], name="系统性空头抛压得分 (QQQ/SPY/IWM 累计超卖)", mode='lines', line=dict(color="#e74c3c", width=2.5))
         )
@@ -601,7 +600,8 @@ with tab4:
             go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头枯竭得分 (QQQ/SPY/IWM 累计超买)", mode='lines', line=dict(color="#2ecc71", width=2.5))
         )
         fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极端拐点激活线 (得分为 2)")
-        fig_cta.update_layout(title_text="CTA 量化追踪：大盘三大 ETF 指数多/空头趋势耗尽历史得分", template="plotly_white", height=400, yaxes=dict(title="激活分值 (0-3)", tickvals=[0, 1, 2, 3]))
+        # 🛠️ 核心修复处：已将 yaxes 改为正确的 yaxis 属性
+        fig_cta.update_layout(title_text="CTA 量化追踪：大盘三大 ETF 指数多/空头趋势耗尽历史得分", template="plotly_white", height=400, yaxis=dict(title="激活分值 (0-3)", tickvals=[0, 1, 2, 3]))
         st.plotly_chart(fig_cta, use_container_width=True)
     else:
         st.warning("CTA 动量历史阵列演算失败。")
