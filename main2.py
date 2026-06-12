@@ -46,29 +46,25 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """开关2：获取VIX期限结构"""
+    """开关2：获取VIX期限结构（升级保留历史序列）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
-        hist = tickers.history(period='5d')
+        hist = tickers.history(period='3mo')  # 扩大周期以便绘制日线变化
         if not hist.empty and 'Close' in hist.columns:
-            close_data = hist['Close'].ffill()
+            close_data = hist['Close'].ffill().copy()
+            close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
             
             vix = close_data['^VIX'].iloc[-1]
             vix3m = close_data['^VIX3M'].iloc[-1]
-            
-            if np.isnan(vix):
-                vix = hist['Close']['^VIX'].dropna().iloc[-1]
-            if np.isnan(vix3m):
-                vix3m = hist['Close']['^VIX3M'].dropna().iloc[-1]
-                
-            ratio = vix3m / vix
+            ratio = close_data['Ratio'].iloc[-1]
             
             bottom_active = ratio > 1.0  # 回到 Contango 视为抄底信号之一
             top_active = vix < 12.0 or ratio > 1.25  # 极端自满
             
             return {
                 "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3),
-                "bottom_active": bottom_active, "top_active": top_active, "error": False
+                "bottom_active": bottom_active, "top_active": top_active, "error": False,
+                "df": close_data.tail(60)  # 返回最近60个交易日的数据
             }
     except Exception as e:
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False}
@@ -76,7 +72,7 @@ def fetch_vix_data():
 
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
-    """开关3：获取加密货币资产永续合约资金费率与OI趋势"""
+    """开关3：获取加密货币资产永续合约资金费率与OI趋势（包含近期历史）"""
     try:
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
@@ -95,9 +91,24 @@ def fetch_crypto_signals():
         bottom_active = funding_rate >= 0.0  # 费率转正表示情绪企稳
         top_active = funding_rate >= 0.035  # 杠杆过载
         
+        # 抓取近期历史资金费率以供绘图
+        hist_df = None
+        try:
+            hist_url = "https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=60"
+            hist_res = requests.get(hist_url, timeout=5).json()
+            if hist_res.get("code") == "0":
+                hist_data = hist_res['data']
+                hist_df = pd.DataFrame(hist_data)
+                hist_df['fundingTime'] = pd.to_datetime(hist_df['fundingTime'].astype(float), unit='ms')
+                hist_df['fundingRate'] = hist_df['fundingRate'].astype(float) * 100
+                hist_df = hist_df.sort_values('fundingTime')
+        except:
+            pass  # 保证主接口挂了历史图表不会直接 crash 页面
+        
         return {
             "funding_rate": f"{funding_rate:.4f}%", "oi": f"{open_interest:,.0f}",
-            "bottom_active": bottom_active, "top_active": top_active, "error": False
+            "bottom_active": bottom_active, "top_active": top_active, "error": False,
+            "hist_df": hist_df
         }
     except Exception as e:
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False}
@@ -152,7 +163,6 @@ def fetch_squeezemetrics_data():
         except Exception:
             pass
 
-    # Mock兜底数据
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
         'date': dates, 'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,
@@ -174,11 +184,8 @@ def fetch_cboe_official_history(symbol):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        # CBOE 官方数据包含完整的历史
         df = pd.read_csv(url)
         df.columns = df.columns.str.lower()
-        
-        # 兼容官方的 trade_date 或 date 字段
         date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
         df['date'] = pd.to_datetime(df[date_col])
         df.set_index('date', inplace=True)
@@ -189,57 +196,55 @@ def fetch_cboe_official_history(symbol):
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """升级版：大盘 ETF 与 CBOE 官方数据混合对齐引擎"""
+    """升级版：大盘 ETF 与 CBOE 官方数据混合对齐引擎（增强历史序列输出）"""
     try:
-        # 1. 正常的指数和 ETF 依然走 yfinance 获取高频数据
         yf_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
         yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
         yf_data = yf_data.ffill()
         latest = yf_data.iloc[-1]
         
-        # 创建基础的清洗后 DataFrame
         data = yf_data[['QQQ', 'SPY', 'IWM', 'RSP']].copy()
         
-        # 2. 核心修复：单独拉取 CBOE 官方的 COR1M 和 DSPX 历史数据
         corr_official = fetch_cboe_official_history('COR1M')
         dspx_official = fetch_cboe_official_history('DSPX')
         
-        # 3. 混合对齐逻辑：用官方历史垫底，如果今天官方还没更新，用 yfinance 的最新实时值补上
-        # 处理相关性序列
         if not corr_official.empty:
             corr_series = corr_official.reindex(data.index)
             if np.isnan(corr_series.iloc[-1]) or corr_series.tail(10).max() == corr_series.tail(10).min():
                 corr_series.iloc[-1] = latest.get('^COR1M', corr_series.dropna().iloc[-1] if not corr_series.dropna().empty else 17.8)
             corr_series = corr_series.ffill()
         else:
-            corr_series = yf_data['^COR1M'] # 兜底机制
+            corr_series = yf_data['^COR1M']
             
-        # 处理离散度序列
         if not dspx_official.empty:
             dspx_series = dspx_official.reindex(data.index)
             if np.isnan(dspx_series.iloc[-1]):
                 dspx_series.iloc[-1] = latest.get('^DSPX', dspx_series.dropna().iloc[-1] if not dspx_series.dropna().empty else 40.0)
             dspx_series = dspx_series.ffill()
         else:
-            dspx_series = yf_data['^DSPX'] # 兜底机制
+            dspx_series = yf_data['^DSPX']
 
         # ---------------------------------------------------------------------
-        # 开关4：升级版 CTA 动向追踪 (保持原样)
+        # 开关4：升级版 CTA 动向追踪 (历史日线级别阵列演算)
         # ---------------------------------------------------------------------
-        cta_shorts_exhausted = 0
-        cta_longs_exhausted = 0
+        cta_shorts_series = pd.Series(0, index=data.index)
+        cta_longs_series = pd.Series(0, index=data.index)
+        
         for idx_name in ['QQQ', 'SPY', 'IWM']:
             price = data[idx_name]
             ma21 = price.rolling(21).mean()
             ma63 = price.rolling(63).mean()
             ma126 = price.rolling(126).mean()
-            p_cur = price.iloc[-1]
-            if p_cur < ma21.iloc[-1] and p_cur < ma63.iloc[-1] and p_cur < ma126.iloc[-1]:
-                if (p_cur - ma21.iloc[-1]) / ma21.iloc[-1] < -0.04:
-                    cta_shorts_exhausted += 1
-            if p_cur > ma21.iloc[-1] and p_cur > ma63.iloc[-1] and p_cur > ma126.iloc[-1]:
-                if (p_cur - ma21.iloc[-1]) / ma21.iloc[-1] > 0.04:
-                    cta_longs_exhausted += 1
+            
+            # 向量化计算每日的偏离极值
+            short_mask = (price < ma21) & (price < ma63) & (price < ma126) & ((price - ma21) / ma21 < -0.04)
+            long_mask = (price > ma21) & (price > ma63) & (price > ma126) & ((price - ma21) / ma21 > 0.04)
+            
+            cta_shorts_series += short_mask.astype(int)
+            cta_longs_series += long_mask.astype(int)
+
+        cta_shorts_exhausted = cta_shorts_series.iloc[-1]
+        cta_longs_exhausted = cta_longs_series.iloc[-1]
 
         cta_bottom_active = cta_shorts_exhausted >= 2
         cta_top_active = cta_longs_exhausted >= 2
@@ -249,23 +254,23 @@ def calculate_quant_and_breadth_signals():
         elif cta_shorts_exhausted > 0 or cta_longs_exhausted > 0: cta_status_text = "CTA 动量分化调仓期"
 
         # ---------------------------------------------------------------------
-        # 开关6：防粘合 CBOE 交叉判断（使用混合对齐后的完整序列计算均线）
+        # 开关6：防粘合 CBOE 交叉判断
         # ---------------------------------------------------------------------
-        if corr_series.tail(10).max() == corr_series.tail(10).min():
+        corr_is_broken = corr_series.tail(10).max() == corr_series.tail(10).min()
+        corr_fast = corr_series.ewm(span=5, adjust=False).mean()
+        corr_slow = corr_series.ewm(span=21, adjust=False).mean()
+        corr_q75 = corr_series.rolling(126).quantile(0.75) 
+        corr_q25 = corr_series.rolling(126).quantile(0.25)
+        
+        if corr_is_broken:
             cboe_corr_text = f"当前:{latest.get('^COR1M', 0):.2f} (⚠️ 历史断流，无法计算均线拐点)"
             corr_bottom_active = False 
         else:
-            corr_fast = corr_series.ewm(span=5, adjust=False).mean()
-            corr_slow = corr_series.ewm(span=21, adjust=False).mean()
-            corr_q75 = corr_series.rolling(126).quantile(0.75) 
-            corr_q25 = corr_series.rolling(126).quantile(0.25)
-            
             corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1]
             corr_turning_down = corr_fast.iloc[-1] < corr_slow.iloc[-1]
             corr_bottom_active = corr_recent_high and corr_turning_down
             cboe_corr_text = f"当前:{corr_series.iloc[-1]:.2f} (EMA5:{corr_fast.iloc[-1]:.2f} / EMA21:{corr_slow.iloc[-1]:.2f})"
-        
-        # 离散度快慢线计算
+       
         dsp_fast = dspx_series.ewm(span=5, adjust=False).mean()
         dsp_slow = dspx_series.ewm(span=21, adjust=False).mean()
         
@@ -274,10 +279,22 @@ def calculate_quant_and_breadth_signals():
             market_complacent = corr_slow.iloc[-1] < corr_q25.iloc[-1]
         except:
             market_complacent = False
+            
         disp_breaking_up = dsp_fast.iloc[-1] > dsp_slow.iloc[-1]
         breadth_top_active = market_high and market_complacent and disp_breaking_up
         
         spy_rsp_ratio = latest['SPY'] / latest['RSP']
+        
+        # 统合历史序列输出
+        df_hist = pd.DataFrame(index=data.index)
+        df_hist['corr'] = corr_series
+        df_hist['corr_fast'] = corr_fast
+        df_hist['corr_slow'] = corr_slow
+        df_hist['dspx'] = dspx_series
+        df_hist['dsp_fast'] = dsp_fast
+        df_hist['dsp_slow'] = dsp_slow
+        df_hist['cta_shorts'] = cta_shorts_series
+        df_hist['cta_longs'] = cta_longs_series
         
         return {
             "error": False,
@@ -288,7 +305,9 @@ def calculate_quant_and_breadth_signals():
             "cta_bottom_active": cta_bottom_active,
             "cta_top_active": cta_top_active,
             "corr_bottom_active": corr_bottom_active,
-            "breadth_top_active": breadth_top_active
+            "breadth_top_active": breadth_top_active,
+            "corr_is_broken": corr_is_broken,
+            "df_hist": df_hist.tail(60)  # 取最近60天对齐
         }
     except Exception as e:
         return {
@@ -391,7 +410,7 @@ with c1:
 with c2:
     st.metric(label="🚨 见顶风控激活数 (提前逃顶信号)", value=f"{top_score} / 6", delta="-触发高位逃顶线" if top_score >= 4 else "处于安全健康牛市", delta_color="inverse")
 
-# 💡 联动修改：全面升级微观执行端联动
+# 联动修改：全面升级微观执行端联动
 if top_score >= 4:
     status_color = "red"
     action_title = "🚨 【红色暴风雨：触发全面防守逃顶线】"
@@ -451,61 +470,43 @@ for i, s in enumerate(switches):
         """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. 图表可视化与纳指引擎（🔥 已升级：智能自适应 Y 轴缩放，彻底解决图形压缩）
+# 5. 图表可视化与纳指引擎
 # -----------------------------------------------------------------------------
 st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
 
 @st.cache_data(ttl=1800)
 def fetch_ndx_chart_data():
-    # 保持使用标准单层 history 规避之前的 MultiIndex 报错 Bug
     df = yf.Ticker('^NDX').history(period='3mo')
     return df
 
 ndx_data = fetch_ndx_chart_data()
 if not ndx_data.empty:
     fig_ndx = go.Figure()
-    
-    # 获取最新收盘价
     latest_ndx_close = float(ndx_data['Close'].iloc[-1])
     
-    # 渲染纳指实际收盘走势曲线
     fig_ndx.add_trace(go.Scatter(
-        x=ndx_data.index, 
-        y=ndx_data['Close'], 
-        mode='lines', 
-        name='NDX 实际走势曲线', 
-        line=dict(color='#2980b9', width=2.5)
+        x=ndx_data.index, y=ndx_data['Close'], mode='lines', name='NDX 实际走势曲线', line=dict(color='#2980b9', width=2.5)
     ))
     
-    # 动态实时收盘位横线
     fig_ndx.add_hline(
-        y=latest_ndx_close, 
-        line_dash="solid", 
-        line_color="#2c3e50", 
-        annotation_text=f"动态实时收盘位 ({latest_ndx_close:,.2f})", 
-        annotation_position="top right"
+        y=latest_ndx_close, line_dash="solid", line_color="#2c3e50", 
+        annotation_text=f"动态实时收盘位 ({latest_ndx_close:,.2f})", annotation_position="top right"
     )
     
-    # 风控预测边界支撑线
     fig_ndx.add_hline(y=28500, line_dash="dash", line_color="#e74c3c", annotation_text="CTA 二次抛售加速位 (28,500)", annotation_position="bottom right")
     fig_ndx.add_hline(y=26500, line_dash="dash", line_color="#c0392b", annotation_text="极端下影/二次冲洗 (26,500)", annotation_position="bottom right")
     
-    # 核心承接区 (27200 - 28000)
     fig_ndx.add_hrect(
         y0=27200, y1=28000, line_width=0, fillcolor="#2ecc71", opacity=0.15,
         annotation_text="核心承接区 (27,200 - 28,000)", annotation_position="inside top right"
     )
 
-    # 💡 核心升级：量化级智能自适应 Y 轴 Scale 算法
     data_min = float(ndx_data['Close'].min())
     data_max = float(ndx_data['Close'].max())
     
-    # 第一步：以实际走势建立基础视野（上下留出 3% 的呼吸空间）
     y_range_min = data_min * 0.97
     y_range_max = data_max * 1.03
     
-    # 第二步：智能探测风控参考线。如果离当前价格在 12% 以内，则延展视野将其包含进来
-    # 这样既保证了能看到关键线位，又防止了线位过远导致主曲线被压扁
     if 26500 >= data_min * 0.88 and 26500 <= data_max * 1.12:
         y_range_min = min(y_range_min, 26500 * 0.99)
     if 28500 >= data_min * 0.88 and 28500 <= data_max * 1.12:
@@ -514,21 +515,13 @@ if not ndx_data.empty:
     fig_ndx.update_layout(
         title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演 (智能自适应缩放)",
         template="plotly_white",
-        # 💡 应用强制缩放边界，不给 Plotly 胡乱压缩的机会
-        yaxis=dict(
-            title="NDX Index Points",
-            range=[y_range_min, y_range_max],
-            autorange=False, # 必须关闭自动全包裹
-            tickformat=",.0f" # 数字千分位格式化
-        ),
-        xaxis_rangeslider_visible=False,
-        height=500,
-        margin=dict(l=20, r=20, t=40, b=20)
+        yaxis=dict(title="NDX Index Points", range=[y_range_min, y_range_max], autorange=False, tickformat=",.0f"),
+        xaxis_rangeslider_visible=False, height=500, margin=dict(l=20, r=20, t=40, b=20)
     )
     st.plotly_chart(fig_ndx, use_container_width=True)
 
 
-st.markdown("### 📈 机构吸筹/派发量化趋势观测")
+st.markdown("### 📈 机构吸筹/派发量化趋势观测 (开关 1 & 5)")
 if not sm_data["error"] and "df" in sm_data:
     plot_df = sm_data["df"]
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -545,9 +538,103 @@ if not sm_data["error"] and "df" in sm_data:
     fig.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
     st.plotly_chart(fig, use_container_width=True)
 
+# -----------------------------------------------------------------------------
+# 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥
+# 6. 【新增板块】近期日线级别定量跟踪雷达 (开关 2, 3, 4, 6)
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
+
+tab2, tab3, tab4, tab6 = st.tabs([
+    "📊 开关2: VIX 期限结构变动", 
+    "₿ 开关3: 加密离岸高杠杆费率", 
+    "🤖 开关4: CTA 动量极值矩阵", 
+    "🔄 开关6: 隐含相关性与离散度拐点"
+])
+
+# --- TAB 2: VIX 期限结构趋势 ---
+with tab2:
+    if not vix_data["error"] and "df" in vix_data:
+        v_df = vix_data["df"]
+        fig_vix = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_vix.add_trace(
+            go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2)),
+            secondary_y=False
+        )
+        fig_vix.add_trace(
+            go.Scatter(x=v_df.index, y=v_df['Ratio'], name="VIX3M / VIX 比率", line=dict(color="#9b59b6", width=2, dash='solid')),
+            secondary_y=True
+        )
+        # 增加 Contango 临界值 1.0 的横线
+        fig_vix.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", secondary_y=True, annotation_text="Contango 临界线 (1.0)")
+        fig_vix.add_hline(y=1.25, line_dash="dash", line_color="#e74c3c", secondary_y=True, annotation_text="极端亢奋线 (1.25)")
+        fig_vix.update_layout(title_text="VIX 现货波动率 vs 期限结构比率 (日线回溯)", template="plotly_white", height=400)
+        fig_vix.update_yaxes(title_text="VIX Index", secondary_y=False)
+        fig_vix.update_yaxes(title_text="VIX3M / VIX Ratio", secondary_y=True)
+        st.plotly_chart(fig_vix, use_container_width=True)
+    else:
+        st.warning("VIX 历史数据管道未就绪。")
+
+# --- TAB 3: 加密离岸资金费率 ---
+with tab3:
+    if not crypto_data["error"] and crypto_data.get("hist_df") is not None:
+        c_df = crypto_data["hist_df"]
+        fig_crypto = go.Figure()
+        fig_crypto.add_trace(
+            go.Scatter(x=c_df['fundingTime'], y=c_df['fundingRate'], name="BTC 永续合约资金费率 (%)", mode='lines+markers', line=dict(color="#f1c40f", width=2))
+        )
+        fig_crypto.add_hline(y=0.0, line_dash="solid", line_color="#7f8c8d", annotation_text="多空零界点")
+        fig_crypto.add_hline(y=0.035, line_dash="dash", line_color="#e74c3c", annotation_text="多头杠杆过载 (>0.035%)")
+        fig_crypto.update_layout(title_text="OKX BTC-USDT-SWAP 近期资金费率变动区间 (%)", template="plotly_white", height=400, yaxis=dict(title="Funding Rate (%)"))
+        st.plotly_chart(fig_crypto, use_container_width=True)
+    else:
+        st.info("💡 正在实时监控当前费率，或 OKX 历史 API 触及限频，图表暂未加载。可刷新重试。")
+
+# --- TAB 4: CTA 动量极值矩阵 ---
+with tab4:
+    if not quant_data["error"] and "df_hist" in quant_data:
+        h_df = quant_data["df_hist"]
+        fig_cta = go.Figure()
+        fig_cta.add_trace(
+            go.Scatter(x=h_df.index, y=h_df['cta_shorts'], name="系统性空头抛压得分 (QQQ/SPY/IWM 累计超卖)", mode='lines', line=dict(color="#e74c3c", width=2.5), stackg_group='1')
+        )
+        fig_cta.add_trace(
+            go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头枯竭得分 (QQQ/SPY/IWM 累计超买)", mode='lines', line=dict(color="#2ecc71", width=2.5))
+        )
+        fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极端拐点激活线 (得分为 2)")
+        fig_cta.update_layout(title_text="CTA 量化追踪：大盘三大 ETF 指数多/空头趋势耗尽历史得分", template="plotly_white", height=400, yaxes=dict(title="激活分值 (0-3)", tickvals=[0, 1, 2, 3]))
+        st.plotly_chart(fig_cta, use_container_width=True)
+    else:
+        st.warning("CTA 动量历史阵列演算失败。")
+
+# --- TAB 6: 隐含相关性与离散度 ---
+with tab6:
+    if not quant_data["error"] and "df_hist" in quant_data:
+        h_df = quant_data["df_hist"]
+        c6_col1, c6_col2 = st.columns(2)
+        
+        with c6_col1:
+            fig_corr = go.Figure()
+            fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr'], name="COR1M 隐含相关性真实值", line=dict(color="#bdc3c7", width=1)))
+            fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_fast'], name="EMA5 (快线)", line=dict(color="#e74c3c", width=2)))
+            fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_slow'], name="EMA21 (慢线)", line=dict(color="#2c3e50", width=2)))
+            fig_corr.update_layout(title_text="CBOE COR1M 相关性：快慢线死叉表示恐慌抛售结束", template="plotly_white", height=380)
+            st.plotly_chart(fig_corr, use_container_width=True)
+            
+        with c6_col2:
+            fig_disp = go.Figure()
+            fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dspx'], name="DSPX 离散度真实值", line=dict(color="#bdc3c7", width=1)))
+            fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_fast'], name="EMA5 (快线)", line=dict(color="#2ecc71", width=2)))
+            fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_slow'], name="EMA21 (慢线)", line=dict(color="#34495e", width=2)))
+            fig_disp.update_layout(title_text="CBOE DSPX 离散度：高位快线金叉慢线表示结构性拉巨头出个股", template="plotly_white", height=380)
+            st.plotly_chart(fig_disp, use_container_width=True)
+    else:
+        st.warning("CBOE 交叉盘历史对齐引擎未就绪。")
+
+
 st.markdown("""
 ---
 💡 **Sentinel 2.0 资金逻辑综合实战指南**：
 1. **看懂 K 线背后的广度死穴**：当标普500每天微涨，而你发现 **SPY/RSP 比率** 飙升，结合开关6预警，这说明中小个股已提前失血，属于典型的**假牛市、真派发**。
-2. **结合你的微观诊断系统**：大盘底部得分 $\ge 4$ 时，是利用你微观量化诊断模型计算个股 EV 最具性价比的时刻。大盘提供的系统性折价，能让模型筛选出的高胜率个股爆发出极强的正向期望收益。
+2. **结合你的微观诊断系统**：大盘底部得分 >= 4 时，是利用你微观量化诊断模型计算个股 EV 最具性价比的时刻。大盘提供的系统性折价，能让模型筛选出的高胜率个股爆发出极强的正向期望收益。
 """)
