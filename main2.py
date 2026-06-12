@@ -200,7 +200,7 @@ def fetch_cboe_official_history(symbol):
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """混合对齐引擎 —— 包含快慢线序阵形演算与底层时间锚定"""
+    """升级版：大盘 ETF 与 CBOE 官方数据混合对齐引擎（引入微观动态诊断逻辑）"""
     try:
         yf_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
         yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
@@ -228,19 +228,16 @@ def calculate_quant_and_breadth_signals():
         else:
             dspx_series = yf_data['^DSPX']
 
-        # 开关4：CTA 动向矩阵历史序列计算
+        # 开关4：CTA 动向追踪不变
         cta_shorts_series = pd.Series(0, index=data.index)
         cta_longs_series = pd.Series(0, index=data.index)
-        
         for idx_name in ['QQQ', 'SPY', 'IWM']:
             price = data[idx_name]
             ma21 = price.rolling(21).mean()
             ma63 = price.rolling(63).mean()
             ma126 = price.rolling(126).mean()
-            
             short_mask = (price < ma21) & (price < ma63) & (price < ma126) & ((price - ma21) / ma21 < -0.04)
             long_mask = (price > ma21) & (price > ma63) & (price > ma126) & ((price - ma21) / ma21 > 0.04)
-            
             cta_shorts_series += short_mask.astype(int)
             cta_longs_series += long_mask.astype(int)
 
@@ -254,54 +251,67 @@ def calculate_quant_and_breadth_signals():
         elif cta_top_active: cta_status_text = "系统性多头买盘枯竭"
         elif cta_shorts_exhausted > 0 or cta_longs_exhausted > 0: cta_status_text = "CTA 动量分化调仓期"
 
-        # 开关6：快/慢/现货相对位置及大级别状态计算
+        # ---------------------------------------------------------------------
+        # 开关6：CBOE 交叉盘及动态分情况推演（核心升级）
+        # ---------------------------------------------------------------------
         corr_is_broken = corr_series.tail(10).max() == corr_series.tail(10).min()
         corr_fast = corr_series.ewm(span=5, adjust=False).mean()
         corr_slow = corr_series.ewm(span=21, adjust=False).mean()
         corr_q75 = corr_series.rolling(126).quantile(0.75) 
+        corr_q25 = corr_series.rolling(126).quantile(0.25)
         
         dsp_fast = dspx_series.ewm(span=5, adjust=False).mean()
         dsp_slow = dspx_series.ewm(span=21, adjust=False).mean()
-        dspx_q75 = dspx_series.rolling(126).quantile(0.75)
-
-        c_val, c_f, c_s = corr_series.iloc[-1], corr_fast.iloc[-1], corr_slow.iloc[-1]
-        d_val, d_f, d_s = dspx_series.iloc[-1], dsp_fast.iloc[-1], dsp_slow.iloc[-1]
         
-        def determine_line_order(val, fast, slow):
-            labels = [("现货", val), ("快线", fast), ("慢线", slow)]
-            labels.sort(key=lambda x: x[1], reverse=True)
-            return " > ".join([x[0] for x in labels])
+        c_spot, c_f, c_s = corr_series.iloc[-1], corr_fast.iloc[-1], corr_slow.iloc[-1]
+        d_spot, d_f, d_s = dspx_series.iloc[-1], dsp_fast.iloc[-1], dsp_slow.iloc[-1]
+        
+        # 1. 动态研判相关性微观动能
+        if corr_is_broken:
+            corr_diag = "历史数据流断裂，无法动态诊断。"
+            corr_bottom_active = False
+        else:
+            corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1]
+            corr_bottom_active = corr_recent_high and (c_f < c_s)
+            
+            if c_spot > c_f > c_s:
+                corr_diag = "【相关性强劲多头加速】全市场恐慌共振急速加剧，无差别踩踏进行时，左侧高危。"
+            elif corr_bottom_active:
+                corr_diag = "【相关性确立死叉反转】高位恐慌共振正式见顶回落！无差别抛售结束，抄底黄金信号激活。"
+            elif c_f < c_s:
+                corr_diag = "【相关性处于空头退潮】市场同频恐慌持续消退，资金逐步恢复理性。"
+            else:
+                corr_diag = "【相关性低位蓄势震荡】全市场处于非共振状态，个股走势呈现常态化独立性。"
 
-        corr_pos_str = determine_line_order(c_val, c_f, c_s)
-        dsp_pos_str = determine_line_order(d_val, d_f, d_s)
-
+        # 2. 动态研判离散度微观动能
         market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
-        
-        corr_turning_down = c_f < c_s
-        corr_large_bottom = corr_turning_down and (corr_slow.tail(15).max() > corr_q75.iloc[-1])
-        corr_small_bottom = corr_turning_down and not corr_large_bottom
+        try: market_complacent = c_s < corr_q25.iloc[-1]
+        except: market_complacent = False
         
         disp_breaking_up = d_f > d_s
-        disp_large_correction = disp_breaking_up and (dspx_series.tail(15).max() > dspx_q75.iloc[-1]) and market_high
-        disp_small_correction = disp_breaking_up and not disp_large_correction
-
-        if corr_large_bottom:
-            corr_tier = "🚀 大级别金身底确立 (全市场高热踩踏无差别释放，黄金左侧买点)"
-        elif corr_small_bottom:
-            corr_tier = "🌤️ 小级别波段底形成 (常规回踩动能衰竭，个股即将开启修复)"
-        else:
-            corr_tier = "🔘 状态平衡 / 当前未触及明确见底拐点"
-            
-        if disp_large_correction:
-            disp_tier = "🚨 大级别回调危机预警 (极端结构性撕裂，高位抱团股极易引发踩踏)"
-        elif disp_small_correction:
-            disp_tier = "⚠️ 小级别结构回调预警 (多头边际买盘降温，局部出现获利回吐)"
-        else:
-            disp_tier = "🔘 状态安全 / 广度指标未见异常分裂隐患"
-
-        corr_bottom_active = corr_large_bottom or corr_small_bottom
-        breadth_top_active = disp_large_correction or disp_small_correction
+        breadth_top_active = market_high and market_complacent and disp_breaking_up
         
+        if d_spot > d_f > d_s:
+            disp_diag = "【离散度强劲多头加速】市场撕裂极度恶化！巨头掩护出货迹象显著，大盘广度死穴正在拉响警报。"
+        elif breadth_top_active:
+            disp_diag = "【离散度确定金叉突破】大盘高位自满，但分化动能突破！确立权重抱团/个股失血的终极见顶风控信号。"
+        elif d_f < d_s:
+            disp_diag = "【离散度处于分化收敛】两极分化动能减弱，个股收益率分布趋同，结构性撕裂暂时缓解。"
+        else:
+            disp_diag = "【离散度常态化震荡】无极端抱团或分裂，板块轮动相对均衡。"
+
+        # 3. 联合象限矩阵核心结论诊断
+        if (c_f > c_s) and (d_f <= d_s):
+            combined_diag = "📊 【当前资金象限：泥沙俱下型】相关性升、离散度降。典型系统性流动性宣泄，等待相关性死叉左侧重仓建仓。"
+        elif (c_f <= c_s) and (d_f > d_s):
+            combined_diag = "🚨 【当前资金象限：结构撕裂型】相关性降、离散度升。巨头绑架指数，小盘失血，高度危险，建议全面收紧个股止盈线。"
+        elif (c_f <= c_s) and (d_f <= d_s):
+            combined_diag = "⏳ 【当前资金象限：低波自满型】双指标低位蓄势。市场缺乏极端多空主线，适合常规运行诊断模型捕捉中性EV红利。"
+        else:
+            combined_diag = "⚡ 【当前资金象限：宏观剧震型】双指标双升。全市场既有系统性宽幅震荡，又在进行暴烈的风格大洗牌，控制多头杠杆。"
+
+        cboe_corr_text = f"当前:{c_spot:.2f} (EMA5:{c_f:.2f} / EMA21:{c_s:.2f})"
+        cboe_disp_text = f"当前:{d_spot:.2f} (EMA5:{d_f:.2f} / EMA21:{d_s:.2f})"
         spy_rsp_ratio = latest['SPY'] / latest['RSP']
         
         df_hist = pd.DataFrame(index=data.index)
@@ -317,25 +327,25 @@ def calculate_quant_and_breadth_signals():
         return {
             "error": False,
             "cta_status": cta_status_text,
-            "corr_pos": corr_pos_str,
-            "dsp_pos": dsp_pos_str,
-            "corr_tier": corr_tier,
-            "disp_tier": disp_tier,
+            "cboe_corr": cboe_corr_text,
+            "cboe_disp": cboe_disp_text,
             "spy_rsp_ratio": round(spy_rsp_ratio, 4),
             "cta_bottom_active": cta_bottom_active,
             "cta_top_active": cta_top_active,
             "corr_bottom_active": corr_bottom_active,
             "breadth_top_active": breadth_top_active,
             "corr_is_broken": corr_is_broken,
-            "df_hist": df_hist.tail(60),
-            "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            "corr_diag": corr_diag,          # 💡 新增动态评语导出
+            "disp_diag": disp_diag,          # 💡 新增动态评语导出
+            "combined_diag": combined_diag,  # 💡 新增联合象限评语导出
+            "df_hist": df_hist.tail(60)
         }
     except Exception as e:
         return {
             "error": True, "msg": str(e), 
             "cta_bottom_active": False, "cta_top_active": False,
             "corr_bottom_active": False, "breadth_top_active": False,
-            "fetched_at": "矩阵演算中断"
+            "corr_diag": "诊断异常", "disp_diag": "诊断异常", "combined_diag": "诊断异常"
         }
 
 # -----------------------------------------------------------------------------
@@ -417,13 +427,12 @@ switches = [
         "name": "全局隐含相关性拐点与离散度爆发",
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
-        "value": f"相关性线序: {quant_data.get('corr_pos', 'N/A')} | 离散度线序: {quant_data.get('dsp_pos', 'N/A')}",
-        "source": "CBOE COR1M / DSPX 指数矩阵定位",
-        "desc_bottom": f"当前状态: {quant_data.get('corr_tier', 'N/A')}",
-        "desc_top": f"当前状态: {quant_data.get('disp_tier', 'N/A')}",
-        "fetched_status": "成功 🟢" if (not quant_data["error"] and not quant_data.get("corr_is_broken", False)) else ("历史断流 ⚠️" if quant_data.get("corr_is_broken", False) else "抓取失败 🔴"),
-        "update_cycle": "收盘级日线计算 (每 1 小时刷新缓存)",
-        "last_updated": quant_data.get("fetched_at", "N/A")
+        "value": f"相关性 {quant_data.get('cboe_corr', 'N/A')} | 离散度 {quant_data.get('cboe_disp', 'N/A')}",
+        "source": "CBOE COR1M / DSPX 指数 (EMA5 与 EMA21)",
+        # 💡 下方三行全部变更为实时量化推演文字，彻底告别死板的静态字符
+        "desc_bottom": quant_data.get("corr_diag", "无诊断"),
+        "desc_top": quant_data.get("disp_diag", "无诊断"),
+        "fetched_status": quant_data.get("combined_diag", "无诊断") if not quant_data["error"] else "抓取失败 🔴"
     }
 ]
 
