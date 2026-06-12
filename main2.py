@@ -41,12 +41,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. 增强版数据获取与处理模块 (Data Pipeline)
+# 2. 数据获取与处理模块 (Data Pipeline)
 # -----------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """开关2：获取VIX期限结构（升级保留历史序列）"""
+    """开关2：获取VIX期限结构（保留历史序列）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
         hist = tickers.history(period='3mo')  # 扩大周期以便绘制日线变化
@@ -196,7 +196,7 @@ def fetch_cboe_official_history(symbol):
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """升级版：大盘 ETF 与 CBOE 官方数据混合对齐引擎（增强历史序列输出）"""
+    """大盘 ETF 与 CBOE 官方数据混合对齐引擎（历史序列输出）"""
     try:
         yf_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
         yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
@@ -225,7 +225,7 @@ def calculate_quant_and_breadth_signals():
             dspx_series = yf_data['^DSPX']
 
         # ---------------------------------------------------------------------
-        # 开关4：升级版 CTA 动向追踪 (历史日线级别阵列演算)
+        # 开关4：CTA 动向追踪 (历史日线级别阵列演算)
         # ---------------------------------------------------------------------
         cta_shorts_series = pd.Series(0, index=data.index)
         cta_longs_series = pd.Series(0, index=data.index)
@@ -410,7 +410,7 @@ with c1:
 with c2:
     st.metric(label="🚨 见顶风控激活数 (提前逃顶信号)", value=f"{top_score} / 6", delta="-触发高位逃顶线" if top_score >= 4 else "处于安全健康牛市", delta_color="inverse")
 
-# 联动修改：全面升级微观执行端联动
+# 综合诊断与微观执行端联动提示
 if top_score >= 4:
     status_color = "red"
     action_title = "🚨 【红色暴风雨：触发全面防守逃顶线】"
@@ -539,8 +539,7 @@ if not sm_data["error"] and "df" in sm_data:
     st.plotly_chart(fig, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥 🔥
-# 6. 【新增板块】近期日线级别定量跟踪雷达 (开关 2, 3, 4, 6)
+# 6. 近期日线级别定量跟踪雷达 (开关 2, 3, 4, 6)
 # -----------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
@@ -565,7 +564,6 @@ with tab2:
             go.Scatter(x=v_df.index, y=v_df['Ratio'], name="VIX3M / VIX 比率", line=dict(color="#9b59b6", width=2, dash='solid')),
             secondary_y=True
         )
-        # 增加 Contango 临界值 1.0 的横线
         fig_vix.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", secondary_y=True, annotation_text="Contango 临界线 (1.0)")
         fig_vix.add_hline(y=1.25, line_dash="dash", line_color="#e74c3c", secondary_y=True, annotation_text="极端亢奋线 (1.25)")
         fig_vix.update_layout(title_text="VIX 现货波动率 vs 期限结构比率 (日线回溯)", template="plotly_white", height=400)
@@ -595,8 +593,9 @@ with tab4:
     if not quant_data["error"] and "df_hist" in quant_data:
         h_df = quant_data["df_hist"]
         fig_cta = go.Figure()
+        # 🟢 此处已成功移除错误的 stackg_group 参数
         fig_cta.add_trace(
-            go.Scatter(x=h_df.index, y=h_df['cta_shorts'], name="系统性空头抛压得分 (QQQ/SPY/IWM 累计超卖)", mode='lines', line=dict(color="#e74c3c", width=2.5), stackg_group='1')
+            go.Scatter(x=h_df.index, y=h_df['cta_shorts'], name="系统性空头抛压得分 (QQQ/SPY/IWM 累计超卖)", mode='lines', line=dict(color="#e74c3c", width=2.5))
         )
         fig_cta.add_trace(
             go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头枯竭得分 (QQQ/SPY/IWM 累计超买)", mode='lines', line=dict(color="#2ecc71", width=2.5))
