@@ -46,7 +46,7 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """升级版 - 五级区间波幅动态诊断引擎（已根据突变跨线规则与动态预警重构）"""
+    """升级版 - 五级区间波幅动态诊断引擎（已根据比率与现货分情况独立重构）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
         hist = tickers.history(period='3mo')  
@@ -68,45 +68,73 @@ def fetch_vix_data():
             if len(valid_ratios) >= 2:
                 prev_ratio = valid_ratios.iloc[-2]
             
-            # --- 新核心逻辑：跨线突变触发标准 ---
+            # --- 核心逻辑：跨线突变触发标准 ---
             # 抄底信号：昨日 <= 1 且今日 > 1
             bottom_active = (prev_ratio <= 1.0) and (ratio > 1.0)
             # 逃顶信号：昨日 >= 1 且今日 < 1，或者今日大于 1.24
             top_active = ((prev_ratio >= 1.0) and (ratio < 1.0)) or (ratio > 1.24)
             
-            # --- 状态诊断与非极值预警机制 ---
+            # -----------------------------------------------------------------
+            # 【分情况诊断 1】：VIX3M/VIX 期限比率独立诊断
+            # -----------------------------------------------------------------
             if bottom_active:
-                vix_diag_status = "🚨 信号激活：比率向上突破（恐慌出清）"
-                vix_desc_bottom = f"【期限比率跨线突破】比率自昨日({prev_ratio:.3f})<=1转为今日({ratio:.3f})>1。结构由倒挂修复，黄金买点激活。"
-                vix_desc_top = f"当前VIX现货为 {vix:.2f}，空头无脑踩踏情绪面临衰竭。"
-            elif top_active:
-                vix_diag_status = "🚨 风控激活：比率高位超载/趋势筑顶逆转"
-                vix_desc_bottom = "多头过于拥挤，期限结构支撑动摇，左侧防御警戒启动。"
-                if ratio > 1.24:
-                    vix_desc_top = f"【自满极限过热】期限比率({ratio:.3f})冲破1.24绝对高线，期权多头无防备拥挤，极端警惕闪崩。"
-                else:
-                    vix_desc_top = f"【自满趋势破位】比率自昨日({prev_ratio:.3f})>=1跌破至今日({ratio:.3f})<1，牛市高位情绪基础瓦解。"
+                vix_ratio_diag = f"【比率跨线修复】比率自昨日({prev_ratio:.3f})<=1向上突破为今日({ratio:.3f})>1。结构由倒挂发生多头逆转修复。"
+            elif (prev_ratio >= 1.0) and (ratio < 1.0):
+                vix_ratio_diag = f"【比率自满破位】比率自昨日({prev_ratio:.3f})>=1跌破至今日({ratio:.3f})<1，牛市高位期限结构基础松动。"
+            elif ratio > 1.24:
+                vix_ratio_diag = f"【比率极限超载】当前比率({ratio:.3f})冲破1.24绝对高线，期权做空波动率策略极度拥挤，高度自满。"
+            elif ratio <= 1.0:
+                vix_ratio_diag = f"【比率持续倒挂】当前比率({ratio:.3f})<=1持续低于平衡线，系统流动性仍处于撕裂出清的冰点观察期。"
+            elif 1.20 <= ratio <= 1.24:
+                vix_ratio_diag = f"【比率高位自满】当前比率({ratio:.3f})处于1.20-1.24敏感高位带，市场多头自满情绪常规化积压。"
             else:
-                # 未达到极值但需要注意的“中间预警与提示状态”
-                if ratio <= 1.0:
-                    vix_diag_status = "🟡 风险提示：期限结构深陷持续倒挂"
-                    vix_desc_bottom = f"【情绪冰点期】当前比率({ratio:.3f})<=1持续承压（昨日:{prev_ratio:.3f}），系统流动性仍处于撕裂出清阶段。"
-                    vix_desc_top = f"现货VIX({vix:.2f})处于宽幅震荡。因未发生由负转正突变，暂不计入抄底共振，维持观察。"
-                elif 1.20 <= ratio <= 1.24:
-                    vix_diag_status = "🟡 风险提示：市场自满情绪积压"
-                    vix_desc_bottom = f"当前比率({ratio:.3f})处于1.20-1.24高位敏感带（昨日:{prev_ratio:.3f}），多头动能呈现收窄常态。"
-                    vix_desc_top = f"现货VIX({vix:.2f})持续低迷。虽未触发1.24绝对逃顶线，但建议个股交易开始收紧止盈线，防范尾部异变。"
+                vix_ratio_diag = f"【比率常态均衡】当前比率({ratio:.3f})在Contango常态中轴稳健运行，期限结构保持常态健康。"
+
+            # -----------------------------------------------------------------
+            # 【分情况诊断 2】：VIX 现货独立诊断
+            # -----------------------------------------------------------------
+            if vix >= 24.0:
+                vix_spot_diag = f"【现货恐慌爆发】当前VIX现货飙升至 {vix:.2f}，突破24.0恐慌红线，市场恐慌共振剧烈，宣泄抛压进行时。"
+            elif vix < 13.5:
+                vix_spot_diag = f"【现货极低自满】当前VIX现货极低为 {vix:.2f} (<13.5)，期权空头完全无防备过度乐观，需严防黑天鹅异变。"
+            else:
+                vix_spot_diag = f"【现货常态理性】当前VIX现货为 {vix:.2f}，处于13.5-24.0的合理宽幅震荡区间，大盘暂无突发性异动风险。"
+
+            # -----------------------------------------------------------------
+            # 【综合状态判定】：根据比率与现货交叉推演当下的综合状态
+            # -----------------------------------------------------------------
+            if bottom_active:
+                if vix >= 24.0:
+                    vix_diag_status = "🚀 黄金抄底：现货高位恐慌 ✖ 期限比率完美修复"
                 else:
-                    vix_diag_status = "🟢 状态中性：健康均衡牛市状态"
-                    vix_desc_bottom = f"【结构稳定】当前比率({ratio:.3f})在Contango常态中轴稳健运行（昨日:{prev_ratio:.3f}）。"
-                    vix_desc_top = f"现货VIX({vix:.2f})处于13.5-24常态区间，大盘暂无突发性系统风险。"
+                    vix_diag_status = "🟢 抄底激活：期限比率率先跨线上破平衡线"
+            elif top_active:
+                if ratio > 1.24 and vix < 13.5:
+                    vix_diag_status = "🚨 极度逃顶：现货极限自满 ✖ 比率升水极度超载"
+                else:
+                    vix_diag_status = "🚨 风控激活：比率高位超载或情绪转弱筑顶逆转"
+            else:
+                if ratio <= 1.0 and vix >= 24.0:
+                    vix_diag_status = "🔴 严重防御：期限持续倒挂 ✖ 现货强恐慌宣泄"
+                elif ratio <= 1.0:
+                    vix_diag_status = "🟡 风险提示：期限结构深陷持续倒挂冰点期"
+                elif 1.20 <= ratio <= 1.24:
+                    if vix < 13.5:
+                        vix_diag_status = "🟡 风险提示：双重自满情绪严重积压（建议收紧止盈线）"
+                    else:
+                        vix_diag_status = "🟡 风险提示：市场多头自满情绪常态化积压"
+                else:
+                    if vix < 13.5:
+                        vix_diag_status = "🟡 风险提示：现货隐含波动率极低，保留左侧防备"
+                    else:
+                        vix_diag_status = "🟢 状态中性：健康均衡牛市状态"
             
             return {
                 "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3), "prev_ratio": round(prev_ratio, 3),
                 "bottom_active": bottom_active, "top_active": top_active, "error": False,
                 "vix_diag_status": vix_diag_status,
-                "vix_desc_bottom": vix_desc_bottom,
-                "vix_desc_top": vix_desc_top,
+                "vix_ratio_diag": vix_ratio_diag,
+                "vix_spot_diag": vix_spot_diag,
                 "df": close_data.tail(60),
                 "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -439,12 +467,14 @@ switches = [
         "name": "VIX 期限结构与情绪指标",
         "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
         "top_active": vix_data["top_active"] if not vix_data["error"] else False,
-        "value": f"今日比率: {vix_data.get('ratio', 'N/A')} (昨日: {vix_data.get('prev_ratio', 'N/A')}) | VIX: {vix_data.get('vix', 'N/A')}",
+        "value": f"今日比率: {vix_data.get('ratio', 'N/A')} (昨日: {vix_data.get('prev_ratio', 'N/A')}) | VIX现货: {vix_data.get('vix', 'N/A')}",
         "source": "CBOE 波动率曲线",
-        "desc_bottom": "【抄底激活标准：比率跨线由昨日 <=1 突变为今日 >1】当隐含波动率期限结构打破极度深度倒挂状态、向上收复平衡线时激活，标志着非理性抛售流动性枯竭，转入安全抄底期。",
-        "desc_top": "【逃顶激活标准：比率从昨日 >=1 转为今日 <1，或今日比率突破 >1.24】期限结构基石意外松动，或者Contango升水极度超载，显示风险资产做空波动率策略无脑拥挤，极易诱发多杀多踩踏性闪崩。",
+        "desc_bottom": "【抄底激活标准：比率升上1】当隐含波动率期限结构打破极度深度倒挂状态、向上收复平衡线时激活，标志着非理性抛售流动性枯竭，转入安全抄底期。",
+        "desc_top": "【逃顶激活标准：比率跌破1，或今日比率突破 >1.24】期限结构基石意外松动，或者Contango升水极度超载，显示风险资产做空波动率策略无脑拥挤，极易诱发多杀多踩踏性闪崩。",
         "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
-            f"{vix_data.get('vix_diag_status')} | 诊断详情：{vix_data.get('vix_desc_bottom')} {vix_data.get('vix_desc_top')}"
+            f"<b>当下状态：</b>{vix_data.get('vix_diag_status')}<br>"
+            f"<b>⚖️ 比率分项：</b>{vix_data.get('vix_ratio_diag')}<br>"
+            f"<b>📊 现货分项：</b>{vix_data.get('vix_spot_diag')}"
         ),
         "update_cycle": "每 1 小时",
         "last_updated": now_str
