@@ -635,7 +635,7 @@ switches = [
         ),
         "update_cycle": "每 1 小时",
         "last_updated": now_str
-    }
+    },
     {
         "id": 6,
         "name": "VXN-VIX 科技股波动率剪刀差前哨",
