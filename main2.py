@@ -92,9 +92,9 @@ def fetch_vix_data():
                     vix_diag_status = "🟡 风险提示：期限结构深陷持续倒挂"
                     vix_desc_bottom = f"【情绪冰点期】当前比率({ratio:.3f})<=1持续承压（昨日:{prev_ratio:.3f}），系统流动性仍处于撕裂出清阶段。"
                     vix_desc_top = f"现货VIX({vix:.2f})处于宽幅震荡。因未发生由负转正突变，暂不计入抄底共振，维持观察。"
-                elif 1.15 <= ratio <= 1.24:
+                elif 1.20 <= ratio <= 1.24:
                     vix_diag_status = "🟡 风险提示：市场自满情绪积压"
-                    vix_desc_bottom = f"当前比率({ratio:.3f})处于1.15-1.24高位敏感带（昨日:{prev_ratio:.3f}），多头动能呈现收窄常态。"
+                    vix_desc_bottom = f"当前比率({ratio:.3f})处于1.20-1.24高位敏感带（昨日:{prev_ratio:.3f}），多头动能呈现收窄常态。"
                     vix_desc_top = f"现货VIX({vix:.2f})持续低迷。虽未触发1.24绝对逃顶线，但建议个股交易开始收紧止盈线，防范尾部异变。"
                 else:
                     vix_diag_status = "🟢 状态中性：健康均衡牛市状态"
