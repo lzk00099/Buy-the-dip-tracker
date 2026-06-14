@@ -520,12 +520,15 @@ switches = [
         "name": "全局隐含相关性拐点与离散度爆发",
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
-        # 新修改：不显示数值，直接在定位栏（value）显示相关性微观动能和离散度微观动能
-        "value": f"相关性微观动能: {quant_data.get('corr_diag', '无信息')} | 离散度微观动能: {quant_data.get('disp_diag', '无信息')}",
+        "value": f"相关性: {quant_data.get('cboe_corr', 'N/A')} | 离散度: {quant_data.get('cboe_disp', 'N/A')}",
         "source": "CBOE COR1M / DSPX 指数 (EMA5 与 EMA21)",
-        "desc_bottom": quant_data.get("corr_diag", "无诊断信息"),
-        "desc_top": quant_data.get("disp_diag", "无诊断信息"),
-        "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else quant_data.get("combined_diag", "无诊断信息"),
+        "desc_bottom": "【抄底激活标准：相关性死叉反转】当全市场恐慌共振从高位正式见顶回落、EMA5死叉EMA21时激活。标志着流动性无差别踩踏结束，资金逐步恢复理性选择。",
+        "desc_top": "【逃顶激活标准：离散度金叉突破】当大盘处于高位自满，但分化动能突围（EMA5金叉EMA21）时激活。确立了权重股抱团、中小盘失血的终极筑顶防御信号。",
+        "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
+            f"<b>当下状态：</b>{quant_data.get('combined_diag', '无信息')}<br>"
+            f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
+            f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
+        ),
         "update_cycle": "每 1 小时",
         "last_updated": now_str
     }
