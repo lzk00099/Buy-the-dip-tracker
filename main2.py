@@ -429,9 +429,11 @@ switches = [
         "top_active": vix_data["top_active"] if not vix_data["error"] else False,
         "value": f"VIX3M/VIX 比率: {vix_data.get('ratio', 'N/A')} | VIX: {vix_data.get('vix', 'N/A')}",
         "source": "CBOE 波动率曲线",
-        "desc_bottom": vix_data.get("vix_desc_bottom", "无诊断信息"),
-        "desc_top": vix_data.get("vix_desc_top", "无诊断信息"),
-        "fetched_status": vix_data.get("vix_diag_status", "数据抓取失败 🔴") if not vix_data["error"] else "数据抓取失败 🔴",
+        "desc_bottom": "【抄底激活标准：VIX > 32.0 或 比率 < 0.88】波动率飙升打破防御上限，或期限结构深陷倒挂（Backwardation）。代表全市场宣泄系统性恐慌与流动性踩踏，空头动能极值耗尽，多头左侧黄金捡尸点激活。",
+        "desc_top": "【逃顶激活标准：VIX < 11.5 或 比率 > 1.28】波动率跌破历史冰点，或期限结构升水超载（Contango 极值）。代表市场进入极度自满期，多头拥挤且做空波动率策略无脑踩踏，警惕闪崩风控隐患。",
+        "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
+            f"{vix_data.get('vix_diag_status')} | 当前诊断：{vix_data.get('vix_desc_bottom')} {vix_data.get('vix_desc_top')}"
+        ),
         "update_cycle": "每 1 小时",
         "last_updated": now_str
     },
