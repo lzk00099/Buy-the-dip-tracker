@@ -46,14 +46,14 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """升级版 - 五级区间波幅动态诊断引擎"""
+    """升级版 - 五级区间波幅动态诊断引擎（已根据突变跨线规则与动态预警重构）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
         hist = tickers.history(period='3mo')  
         if not hist.empty and 'Close' in hist.columns:
             close_data = hist['Close'].ffill().copy()
             close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
-            
+        
             vix = close_data['^VIX'].iloc[-1]
             vix3m = close_data['^VIX3M'].iloc[-1]
             
@@ -61,34 +61,48 @@ def fetch_vix_data():
             if np.isnan(vix3m): vix3m = close_data['^VIX3M'].dropna().iloc[-1]
                 
             ratio = vix3m / vix
-            bottom_active = False
-            top_active = False
             
-            if vix > 32.0 or ratio < 0.88:
-                bottom_active = True
-                vix_diag_status = "🚨 极值激活：系统性恐慌出清"
-                vix_desc_bottom = f"【系统流动性踩踏】VIX({vix:.2f})飙升破32，期限比率({ratio:.3f})深陷倒挂。多头左侧黄金捡尸点。"
-                vix_desc_top = "恐慌极度释放，空头动能面临极值耗尽，空头随时准备爆仓。"
-            elif (24.0 <= vix <= 32.0) or (0.88 <= ratio < 0.98):
-                vix_diag_status = "🟡 中性提示：波段调整蓄势"
-                vix_desc_bottom = f"【情绪开始恐慌】VIX进入24-32防御区间，期限结构倒挂。进入密切观察期，暂不计入共振总分。"
-                vix_desc_top = "大盘广度承压，波动率快浪处于拉升通道，不盲目猜底。"
-            elif vix < 11.5 or ratio > 1.28:
-                top_active = True
-                vix_diag_status = "🚨 极值激活：市场极度自满顶"
-                vix_desc_bottom = "多头过于拥挤，波动率期权买权（Put）被踩踏式无脑抛售。"
-                vix_desc_top = f"【波动率冰点】VIX({vix:.2f})跌破11.5或期限比({ratio:.3f})超载。短波动率策略极度拥挤，警惕闪崩。"
-            elif (11.5 <= vix < 13.5) or (1.22 <= ratio <= 1.28):
-                vix_diag_status = "🟡 中性预警：自满风控隐患"
-                vix_desc_bottom = "大盘高位滞涨横盘，期权卖方资金持续沉淀挤压。"
-                vix_desc_top = f"【自满防御期】VIX处于11.5-13.5历史低位。多头动能收窄，建议个股收紧止盈线，暂不计入共振总分。"
+            # 安全获取前一日（昨日）的期限比率
+            prev_ratio = 1.0
+            valid_ratios = close_data['Ratio'].dropna()
+            if len(valid_ratios) >= 2:
+                prev_ratio = valid_ratios.iloc[-2]
+            
+            # --- 新核心逻辑：跨线突变触发标准 ---
+            # 抄底信号：昨日 <= 1 且今日 > 1
+            bottom_active = (prev_ratio <= 1.0) and (ratio > 1.0)
+            # 逃顶信号：昨日 >= 1 且今日 < 1，或者今日大于 1.24
+            top_active = ((prev_ratio >= 1.0) and (ratio < 1.0)) or (ratio > 1.24)
+            
+            # --- 状态诊断与非极值预警机制 ---
+            if bottom_active:
+                vix_diag_status = "🚨 信号激活：比率向上突破（恐慌出清）"
+                vix_desc_bottom = f"【期限比率跨线突破】比率自昨日({prev_ratio:.3f})<=1转为今日({ratio:.3f})>1。结构由倒挂修复，黄金买点激活。"
+                vix_desc_top = f"当前VIX现货为 {vix:.2f}，空头无脑踩踏情绪面临衰竭。"
+            elif top_active:
+                vix_diag_status = "🚨 风控激活：比率高位超载/趋势筑顶逆转"
+                vix_desc_bottom = "多头过于拥挤，期限结构支撑动摇，左侧防御警戒启动。"
+                if ratio > 1.24:
+                    vix_desc_top = f"【自满极限过热】期限比率({ratio:.3f})冲破1.24绝对高线，期权多头无防备拥挤，极端警惕闪崩。"
+                else:
+                    vix_desc_top = f"【自满趋势破位】比率自昨日({prev_ratio:.3f})>=1跌破至今日({ratio:.3f})<1，牛市高位情绪基础瓦解。"
             else:
-                vix_diag_status = "🟢 状态中性：健康均衡牛市"
-                vix_desc_bottom = f"【平衡状态】当前VIX({vix:.2f})处于13.5-24健康震荡区间。"
-                vix_desc_top = f"【结构稳定】期限比率({ratio:.3f})处于Contango常态，大盘无系统性尾部突变风险。"
+                # 未达到极值但需要注意的“中间预警与提示状态”
+                if ratio <= 1.0:
+                    vix_diag_status = "🟡 风险提示：期限结构深陷持续倒挂"
+                    vix_desc_bottom = f"【情绪冰点期】当前比率({ratio:.3f})<=1持续承压（昨日:{prev_ratio:.3f}），系统流动性仍处于撕裂出清阶段。"
+                    vix_desc_top = f"现货VIX({vix:.2f})处于宽幅震荡。因未发生由负转正突变，暂不计入抄底共振，维持观察。"
+                elif 1.15 <= ratio <= 1.24:
+                    vix_diag_status = "🟡 风险提示：市场自满情绪积压"
+                    vix_desc_bottom = f"当前比率({ratio:.3f})处于1.15-1.24高位敏感带（昨日:{prev_ratio:.3f}），多头动能呈现收窄常态。"
+                    vix_desc_top = f"现货VIX({vix:.2f})持续低迷。虽未触发1.24绝对逃顶线，但建议个股交易开始收紧止盈线，防范尾部异变。"
+                else:
+                    vix_diag_status = "🟢 状态中性：健康均衡牛市状态"
+                    vix_desc_bottom = f"【结构稳定】当前比率({ratio:.3f})在Contango常态中轴稳健运行（昨日:{prev_ratio:.3f}）。"
+                    vix_desc_top = f"现货VIX({vix:.2f})处于13.5-24常态区间，大盘暂无突发性系统风险。"
             
             return {
-                "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3),
+                "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3), "prev_ratio": round(prev_ratio, 3),
                 "bottom_active": bottom_active, "top_active": top_active, "error": False,
                 "vix_diag_status": vix_diag_status,
                 "vix_desc_bottom": vix_desc_bottom,
@@ -124,19 +138,17 @@ def fetch_crypto_signals():
             hist_url = "https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=60"
             hist_res = requests.get(hist_url, timeout=5).json()
             if hist_res.get("code") == "0":
-                hist_data = hist_res['data']
-                hist_df = pd.DataFrame(hist_data)
+                text_data = hist_res['data']
+                hist_df = pd.DataFrame(text_data)
                 hist_df['fundingTime'] = pd.to_datetime(hist_df['fundingTime'].astype(float), unit='ms')
                 hist_df['fundingRate'] = hist_df['fundingRate'].astype(float) * 100
                 hist_df = hist_df.sort_values('fundingTime')
                 
-                # 获取倒数第二个数据点（前一次的资金费率）
                 if len(hist_df) >= 2:
                     prev_funding_rate = hist_df.iloc[-2]['fundingRate']
         except:
             pass  
         
-        # --- 核心逻辑修改：资金费率由负转正激活抄底，>=0.01 激活见顶 ---
         bottom_active = (prev_funding_rate < 0) and (funding_rate > 0)
         top_active = funding_rate >= 0.01
         
@@ -427,12 +439,12 @@ switches = [
         "name": "VIX 期限结构与情绪指标",
         "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
         "top_active": vix_data["top_active"] if not vix_data["error"] else False,
-        "value": f"VIX3M/VIX 比率: {vix_data.get('ratio', 'N/A')} | VIX: {vix_data.get('vix', 'N/A')}",
+        "value": f"今日比率: {vix_data.get('ratio', 'N/A')} (昨日: {vix_data.get('prev_ratio', 'N/A')}) | VIX: {vix_data.get('vix', 'N/A')}",
         "source": "CBOE 波动率曲线",
-        "desc_bottom": "【抄底激活标准：VIX > 32.0 或 比率 < 0.88】波动率飙升打破防御上限，或期限结构深陷倒挂（Backwardation）。代表全市场宣泄系统性恐慌与流动性踩踏，空头动能极值耗尽，多头左侧黄金捡尸点激活。",
-        "desc_top": "【逃顶激活标准：VIX < 11.5 或 比率 > 1.28】波动率跌破历史冰点，或期限结构升水超载（Contango 极值）。代表市场进入极度自满期，多头拥挤且做空波动率策略无脑踩踏，警惕闪崩风控隐患。",
+        "desc_bottom": "【抄底激活标准：比率跨线由昨日 <=1 突变为今日 >1】当隐含波动率期限结构打破极度深度倒挂状态、向上收复平衡线时激活，标志着非理性抛售流动性枯竭，转入安全抄底期。",
+        "desc_top": "【逃顶激活标准：比率从昨日 >=1 转为今日 <1，或今日比率突破 >1.24】期限结构基石意外松动，或者Contango升水极度超载，显示风险资产做空波动率策略无脑拥挤，极易诱发多杀多踩踏性闪崩。",
         "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
-            f"{vix_data.get('vix_diag_status')} | 当前诊断：{vix_data.get('vix_desc_bottom')} {vix_data.get('vix_desc_top')}"
+            f"{vix_data.get('vix_diag_status')} | 诊断详情：{vix_data.get('vix_desc_bottom')} {vix_data.get('vix_desc_top')}"
         ),
         "update_cycle": "每 1 小时",
         "last_updated": now_str
@@ -463,7 +475,7 @@ switches = [
         "top_active": quant_data["cta_top_active"] if not quant_data["error"] else False,
         "value": f"当前状态: {quant_data.get('cta_status', 'N/A')}",
         "source": "基于 1M/3M/6M 动量偏离度演算",
-        "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约800亿无脑跟空抛压面临彻底耗尽。",
+        "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约跟空抛压面临彻底耗尽。",
         "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
         "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
             "🚨 警报：系统性买盘进入衰竭点" if quant_data["cta_top_active"] else (
@@ -478,7 +490,8 @@ switches = [
         "name": "全局隐含相关性拐点与离散度爆发",
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
-        "value": f"相关性 {quant_data.get('cboe_corr', 'N/A')} | 离散度 {quant_data.get('cboe_disp', 'N/A')}",
+        # 新修改：不显示数值，直接在定位栏（value）显示相关性微观动能和离散度微观动能
+        "value": f"相关性微观动能: {quant_data.get('corr_diag', '无信息')} | 离散度微观动能: {quant_data.get('disp_diag', '无信息')}",
         "source": "CBOE COR1M / DSPX 指数 (EMA5 与 EMA21)",
         "desc_bottom": quant_data.get("corr_diag", "无诊断信息"),
         "desc_top": quant_data.get("disp_diag", "无诊断信息"),
@@ -513,7 +526,8 @@ else:
     status_color = "orange"
     action_title = "⏳ 【黄色震荡：多空状态均衡交织，常规结构分化轮动】"
     action_text = (
-        f"<b>大盘底层资金面诊断</b>：当前系统无极端单边共振信号（抄底激活:<b>{bottom_score}</b> | 见顶风控:<b>{top_score}</b> | 状态中性:<b>{neutral_score}</b>）。"
+        f"<b>大盘底层资金面诊断</b>：当前系统无极端单边共振信号（抄底激活:<b>{bottom_score}</b> | "
+        f"见顶风控:<b>{top_score}</b> | 状态中性:<b>{neutral_score}</b>）。"
         "全市场流动性在巨头与权重股之间常规轮动，未形成系统性突变尾部风险。建议维持常态化均衡仓位，实施中性对冲策略，"
         "持续对目标个股执行日线级别常规诊断。"
     )
@@ -524,7 +538,6 @@ else:
 st.title("🛡️ Sentinel 2.0 核心决策系统：大盘底层资金双向雷达")
 st.subheader(f"看板渲染时钟: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# 删除原有头部的 st.metric 数据卡片，仅保留总体诊断报告框
 st.markdown(f"""
 <div style="padding:15px; border-radius:8px; border-left: 6px solid {status_color}; background-color:#fafafa; margin-bottom:20px;">
     <h4 style="color:{status_color}; margin:0 0 10px 0;">{action_title}</h4>
@@ -546,7 +559,7 @@ for i, s in enumerate(switches):
         else:
             box_class = "status-neutral"
             badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
-            
+        
         metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
             
         st.markdown(f"""
@@ -583,7 +596,7 @@ if not ndx_data.empty:
     fig_ndx.add_trace(go.Scatter(
         x=ndx_data.index, y=ndx_data['Close'], mode='lines', name='NDX 实际走势曲线', line=dict(color='#2980b9', width=2.5)
     ))
-     
+   
     fig_ndx.add_hline(
         y=latest_ndx_close, line_dash="solid", line_color="#2c3e50", 
         annotation_text=f"动态实时收盘位 ({latest_ndx_close:,.2f})", annotation_position="top right"
@@ -664,7 +677,7 @@ with tab2:
             fig_vix_ratio = go.Figure()
             fig_vix_ratio.add_trace(go.Scatter(x=v_df.index, y=v_df['Ratio'], name="VIX3M / VIX 比率", line=dict(color="#9b59b6", width=2)))
             fig_vix_ratio.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", annotation_text="Contango 线 (1.0)")
-            fig_vix_ratio.add_hline(y=1.25, line_dash="dash", line_color="#e74c3c", annotation_text="极端自满 (1.25)")
+            fig_vix_ratio.add_hline(y=1.24, line_dash="dash", line_color="#e74c3c", annotation_text="极端自满 (1.24)")
             fig_vix_ratio.update_layout(title_text="图表 B: VIX3M / VIX 期限结构比率", template="plotly_white", height=400)
             st.plotly_chart(fig_vix_ratio, use_container_width=True)
 
