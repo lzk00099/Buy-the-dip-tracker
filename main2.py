@@ -486,7 +486,7 @@ switches = [
         "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
         "value": f"当前费率: {crypto_data.get('funding_rate', 'N/A')} (前值: {crypto_data.get('prev_funding_rate', 'N/A')}) | OI: {crypto_data.get('oi', 'N/A')}",
         "source": "OKX 永续合约 API",
-        "desc_bottom": "【抄底激活标准：费率由负转正】即前一次资金费率 < 0 且当前资金费率 > 0。这代表空头爆仓踩踏结束，多头资金左侧重新建仓，是大盘恐慌盘出清的重要风向标。",
+        "desc_bottom": "【抄底激活标准：费率由负转正】这代表空头爆仓踩踏结束，多头资金左侧重新建仓，是大盘恐慌盘出清的重要风向标。",
         "desc_top": "【逃顶激活标准：费率 >= 0.01%】即资金费率突破轻微过热线且 OI 处于高位。这代表多头杠杆出现超载隐患，极易触发多杀多洗盘闪崩。",
         "fetched_status": "数据抓取失败 🔴" if crypto_data["error"] else (
             f"🚨 预警：触发逃顶标准，多头杠杆超载过热 (当前 {crypto_data.get('funding_rate')})" if crypto_data["top_active"] else (
