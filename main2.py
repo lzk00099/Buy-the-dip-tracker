@@ -415,6 +415,109 @@ def calculate_quant_and_breadth_signals():
             "corr_diag": "诊断异常", "disp_diag": "诊断异常", "combined_diag": "诊断异常"
         }
 
+@st.cache_data(ttl=3600)
+def fetch_vxn_vix_data():
+    """
+    第 6 套独立引擎 - VXN-VIX 科技股波动率剪刀差前哨系统
+    结构完全对齐开关 3 / 开关 5 规范
+    """
+    try:
+        # 抓取纳指波动率 ^VXN 与 标普波动率 ^VIX
+        tickers = yf.Tickers('^VXN ^VIX')
+        hist = tickers.history(period='3mo')
+        
+        if not hist.empty and 'Close' in hist.columns:
+            df = hist['Close'].ffill().copy()
+            
+            # 计算核心指标：剪刀差 (Spread) 与 比率 (Ratio)
+            df['Spread'] = df['^VXN'] - df['^VIX']
+            df['Ratio'] = df['^VXN'] / df['^VIX']
+            
+            # 计算微观动能快慢线 (EMA5 / EMA21)
+            df['Spread_Fast'] = df['Spread'].ewm(span=5, adjust=False).mean()
+            df['Spread_Slow'] = df['Spread'].ewm(span=21, adjust=False).mean()
+            
+            # 当前最新值与昨日值
+            current_spread = df['Spread'].iloc[-1]
+            prev_spread = df['Spread'].iloc[-2] if len(df) >= 2 else current_spread
+            current_ratio = df['Ratio'].iloc[-1]
+            
+            fast_curr = df['Spread_Fast'].iloc[-1]
+            slow_curr = df['Spread_Slow'].iloc[-1]
+            fast_prev = df['Spread_Fast'].iloc[-2] if len(df) >= 2 else fast_curr
+            slow_prev = df['Spread_Slow'].iloc[-2] if len(df) >= 2 else slow_curr
+            
+            # --- 交叉动能判定 ---
+            # 死叉反转：昨日快>=慢，今日快<慢 (代表科技股极端恐慌无差别宣泄结束，波动率溢价回落)
+            is_death_cross = (fast_prev >= slow_prev) and (fast_curr < slow_curr)
+            # 金叉突围：昨日快<=慢，今日快>慢 (代表科技股投机热度或局部恐慌开始剧烈发散)
+            is_golden_cross = (fast_prev <= slow_prev) and (fast_curr > slow_curr)
+            
+            # 近期（5日内）剪刀差是否曾冲破过高位恐慌带 (例如 > 8.0)
+            had_high_panic = df['Spread'].tail(5).max() > 8.0
+            
+            # --- 动能触发状态 ---
+            bottom_active = is_death_cross and had_high_panic
+            top_active = (current_spread < 2.0) or (is_golden_cross and current_spread > 7.5)
+            
+            # -----------------------------------------------------------------
+            # 【分项诊断 1】：📊 剪刀差微观动能独立诊断
+            # -----------------------------------------------------------------
+            if is_death_cross:
+                spread_diag = f"【剪刀差高位死叉】快线({fast_curr:.2f})下穿慢线({slow_curr:.2f})。科技股特有恐慌宣泄阶段性筑顶，资金正重回理性。"
+            elif is_golden_cross:
+                spread_diag = f"【剪刀差低位金叉】快线({fast_curr:.2f})上穿慢线({slow_curr:.2f})。科技股波动率动能正在非对称放大，警惕分化加剧。"
+            elif fast_curr < slow_curr:
+                spread_diag = f"【动能持续收敛】快线运行于慢线下方，科技股溢价风险维持常态化出清或处于安全多头修复通道。"
+            else:
+                spread_diag = f"【动能持续发散】快线运行于慢线上方，科技股情绪溢价处于高位横盘或风险积聚期。"
+                
+            # -----------------------------------------------------------------
+            # 【分项诊断 2】：📉 比率情绪象限独立诊断
+            # -----------------------------------------------------------------
+            if current_ratio > 1.35:
+                ratio_diag = f"【比率极端过热】当前比率({current_ratio:.2f})突破1.35警戒线，纳指期权多头对冲严重踩踏或投机盘极度拥挤。"
+            elif current_ratio < 1.10:
+                ratio_diag = f"【比率过度自满】当前比率({current_ratio:.2f})跌破1.10，科技股波动率溢价被极限压缩，市场严重缺乏避险防备。"
+            else:
+                ratio_diag = f"【比率常态均衡】当前比率({current_ratio:.2f})在1.10-1.35理性区间，科技股相对于大盘的风险溢价比例健康。"
+
+            # -----------------------------------------------------------------
+            # 【综合状态判定】：合并双指标交叉诊断结果
+            # -----------------------------------------------------------------
+            if bottom_active:
+                combined_diag = "🚀 科技股黄金右侧：剪刀差见顶死叉 ✖ 极端恐慌出清完成"
+            elif top_active:
+                if current_spread < 2.0:
+                    combined_diag = "🚨 科技股极度逃顶：剪刀差极限压缩（暴风雨前的死寂）"
+                else:
+                    combined_diag = "🚨 科技股风控激活：剪刀差高位金叉爆发（波动率溢价异动）"
+            else:
+                if current_ratio < 1.10:
+                    combined_diag = "🟡 风险提示：科技股期权对冲完全懈怠，隐含隐性筑顶风险"
+                elif fast_curr > slow_curr and current_spread > 7.0:
+                    combined_diag = "🔴 强力防御：科技股正遭遇独立流动性无差别抛售浪潮"
+                else:
+                    combined_diag = "🟢 状态中性：科技股与大盘情绪同步，维持常态化牛市结构"
+            
+            return {
+                "current_spread": round(current_spread, 2),
+                "current_ratio": round(current_ratio, 2),
+                "fast_curr": round(fast_curr, 2),
+                "slow_curr": round(slow_curr, 2),
+                "bottom_active": bottom_active,
+                "top_active": top_active,
+                "error": False,
+                "combined_diag": combined_diag,
+                "spread_diag": spread_diag,
+                "ratio_diag": ratio_diag,
+                "df_hist": df,
+                "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+    except Exception as e:
+        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
+    return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
+    
 # -----------------------------------------------------------------------------
 # 3. 业务决策逻辑组装与元数据解析
 # -----------------------------------------------------------------------------
@@ -424,6 +527,7 @@ sm_data = fetch_squeezemetrics_data()
 quant_data = calculate_quant_and_breadth_signals()
 
 now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+vxn_vix_data = fetch_vxn_vix_data()
 
 # 开关 1 与 开关 5 合并逻辑解析
 if not sm_data["error"]:
@@ -528,6 +632,23 @@ switches = [
             f"<b>当下状态：</b>{quant_data.get('combined_diag', '无信息')}<br>"
             f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
             f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
+        ),
+        "update_cycle": "每 1 小时",
+        "last_updated": now_str
+    }
+    {
+        "id": 6,
+        "name": "VXN-VIX 科技股波动率剪刀差前哨",
+        "bottom_active": vxn_vix_data["bottom_active"] if not vxn_vix_data["error"] else False,
+        "top_active": vxn_vix_data["top_active"] if not vxn_vix_data["error"] else False,
+        "value": f"当前剪刀差: {vxn_vix_data.get('current_spread', 'N/A')} (快线: {vxn_vix_data.get('fast_curr', 'N/A')} / 慢线: {vxn_vix_data.get('slow_curr', 'N/A')}) | 当前比率: {vxn_vix_data.get('current_ratio', 'N/A')}",
+        "source": "CBOE VXN 指数 & VIX 指数 实时对冲矩阵",
+        "desc_bottom": "【科技股右侧抄底标准：高位死叉】当剪刀差（VXN-VIX）曾在5日内冲破 8.0 恐慌带，且当前快线（EMA5）死叉跌破慢线（EMA21）时激活。代表科技股最极端的非理性恐慌抛压衰竭，主力资金率先左侧建仓回流。",
+        "desc_top": "【科技股绝对风控标准：极限压缩或高位金叉】当剪刀差极度压缩至 < 2.0（意味着高贝塔的科技股波动率竟与大盘持平，市场毫无对冲防备），或在高位突然金叉暴开时激活。提示科技股估值极其拥挤或正遭遇精准定向爆破。",
+        "fetched_status": "数据抓取失败 🔴" if vxn_vix_data["error"] else (
+            f"<b>当下状态：</b>{vxn_vix_data.get('combined_diag', '无信息')}<br>"
+            f"<b>📊 剪刀差微观动能：</b>{vxn_vix_data.get('spread_diag', '无信息')}<br>"
+            f"<b>📉 比率情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
         ),
         "update_cycle": "每 1 小时",
         "last_updated": now_str
@@ -667,12 +788,13 @@ if not ndx_data.empty:
 st.markdown("---")
 st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🐳 开关1: 机构暗池 DIX & 做市商 GEX 联合敞口",
     "📊 开关2: VIX 期限结构趋势", 
     "₿ 开关3: 加密离岸高杠杆费率", 
     "🤖 开关4: CTA 动量极值矩阵", 
     "🔄 开关5: 隐含相关性与离散度快慢线"
+    "📡 开关6: VXN-VIX 科技剪刀差"
 ])
 
 # --- TAB 1 ---
@@ -757,3 +879,36 @@ with tab5:
             fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_slow'], name="EMA21 (慢线)", line=dict(color="#34495e", width=2)))
             fig_disp.update_layout(title_text="CBOE DSPX 离散度快慢线 (高位金叉发散警惕拉巨头出货)", template="plotly_white", height=380)
             st.plotly_chart(fig_disp, use_container_width=True)
+
+# --- TAB 6 ---
+with tab6:
+    if not vxn_vix_data["error"] and "df_hist" in vxn_vix_data:
+        vx_df = vxn_vix_data["df_hist"]
+        c7_col1, c7_col2 = st.columns(2)
+        
+        with c7_col1:
+            fig_vx_spread = go.Figure()
+            fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread'], name="真实剪刀差 (VXN - VIX)", line=dict(color=\"#bdc3c7\", width=1)))
+            fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Fast'], name="EMA5 (微观快线)", line=dict(color=\"#e74c3c\", width=2)))
+            fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Slow'], name="EMA21 (趋势慢线)", line=dict(color=\"#2c3e50\", width=2)))
+            fig_vx_spread.update_layout(
+                title_text="VXN - VIX 波动率剪刀差收敛雷达 (高位死叉确立科技股黄金买点)", 
+                template="plotly_white", 
+                height=380
+            )
+            st.plotly_chart(fig_vx_spread, use_container_width=True)
+            
+        with c7_col2:
+            fig_vx_ratio = go.Figure()
+            fig_vx_ratio.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Ratio'], name="VXN / VIX 比率", line=dict(color=\"#9b59b6\", width=2, dash='dash')))
+            # 增加警戒参考线
+            fig_vx_ratio.add_hline(y=1.35, line_dash="dash", line_color="#e74c3c", annotation_text="极端过热线 (1.35)")
+            fig_vx_ratio.add_hline(y=1.10, line_dash="dash", line_color="#2ecc71", annotation_text="极限自满线 (1.10)")
+            fig_vx_ratio.update_layout(
+                title_text="VXN / VIX 情绪乘数溢价区间 (追踪科技股相对大盘的拥挤度)", 
+                template="plotly_white", 
+                height=380
+            )
+            st.plotly_chart(fig_vx_ratio, use_container_width=True)
+    else:
+        st.warning("⚠️ VXN-VIX 科技前哨模块数据未激活或加载失败。")
