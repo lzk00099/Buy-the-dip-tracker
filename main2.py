@@ -788,14 +788,23 @@ if not ndx_data.empty:
 st.markdown("---")
 st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "🐳 开关1: 机构暗池 DIX & 做市商 GEX 联合敞口",
-    "📊 开关2: VIX 期限结构趋势", 
-    "₿ 开关3: 加密离岸高杠杆费率", 
-    "🤖 开关4: CTA 动量极值矩阵", 
-    "🔄 开关5: 隐含相关性与离散度快慢线"
-    "📡 开关6: VXN-VIX 科技剪刀差"
+# 1. 动态生成 6 个标签页列表
+all_tabs = st.tabs([
+    "TAB 1: 做市商 & 暗池", 
+    "TAB 2: VIX 期限结构", 
+    "TAB 3: 离岸高杠杆", 
+    "TAB 4: CTA 动量矩阵", 
+    "TAB 5: 相关性与离散度",
+    "TAB 6: VXN-VIX 科技剪刀差"
 ])
+
+# 2. 安全解包，完美兼容下方已有代码对 tab1~tab5 的所有引用，同时无缝引入 tab6
+tab1 = all_tabs[0]
+tab2 = all_tabs[1]
+tab3 = all_tabs[2]
+tab4 = all_tabs[3]
+tab5 = all_tabs[4]
+tab6 = all_tabs[5]
 
 # --- TAB 1 ---
 with tab1:
