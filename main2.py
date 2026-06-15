@@ -638,7 +638,7 @@ switches = [
     },
     {
         "id": 6,
-        "name": "VXN-VIX 科技股四象限雷达",
+        "name": "VXN-VIX 科技股雷达",
         "bottom_active": vxn_vix_data["bottom_active"] if not vxn_vix_data["error"] else False,
         "top_active": vxn_vix_data["top_active"] if not vxn_vix_data["error"] else False,
         "value": f"Spread: {vxn_vix_data.get('current_spread', 'N/A')} | Ratio: {vxn_vix_data.get('current_ratio', 'N/A')} | 熔断风控实时检测",
