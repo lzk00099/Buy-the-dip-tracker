@@ -563,7 +563,7 @@ switches = [
         "desc_bottom": "【双向合力买入】GEX为正建立行情的安全垫，且暗池DIX突破45%大关，说明华尔街主力在暗池疯狂吃单承接，左侧筑底概率极高。",
         "desc_top": "【双向共振杀跌】GEX转负导致做市商变成砸盘放大器，或DIX跌破40%暴露出明牌拉升时主力在悄悄分批派发利润，高位极易闪崩。",
         "fetched_status": sm_status,
-        "update_cycle": "每 4 小时",
+        "update_cycle": "每日更新 (美东盘后)",
         "last_updated": now_str
     },
     {
@@ -580,7 +580,7 @@ switches = [
             f"<b>⚖️ 比率分项：</b>{vix_data.get('vix_ratio_diag')}<br>"
             f"<b>📊 现货分项：</b>{vix_data.get('vix_spot_diag')}"
         ),
-        "update_cycle": "每 1 小时",
+        "update_cycle": "盘中实时波动 (YF延迟)",
         "last_updated": now_str
     },
     {
@@ -599,7 +599,7 @@ switches = [
                 )
             )
         ),
-        "update_cycle": "每 30 分钟",
+        "update_cycle": "7x24小时 实时获取",
         "last_updated": now_str
     },
     {
@@ -616,7 +616,7 @@ switches = [
                 "🟢 激活：系统性空头抛压触底耗尽" if quant_data["cta_bottom_active"] else f"⚪ 运行中：{quant_data.get('cta_status')}"
             )
         ),
-        "update_cycle": "每 1 小时",
+        "update_cycle": "盘中动态计算 (基于最新价)",
         "last_updated": now_str
     },
     {
@@ -633,7 +633,7 @@ switches = [
             f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
             f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
         ),
-        "update_cycle": "每 1 小时",
+        "update_cycle": "每日更新 (盘终结算)",
         "last_updated": now_str
     },
     {
@@ -650,11 +650,10 @@ switches = [
             f"<b>📊 微观动能：</b>{vxn_vix_data.get('spread_diag', '无信息')}<br>"
             f"<b>📉 情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
         ),
-        "update_cycle": "每 1 小时",
+        "update_cycle": "盘中实时波动 (YF延迟)",
         "last_updated": now_str
     }
 ]
-
 # 综合判断当前系统状态
 bottom_score = sum([1 for s in switches if s["bottom_active"]])
 top_score = sum([1 for s in switches if s["top_active"]])
