@@ -457,7 +457,7 @@ def fetch_vxn_vix_data():
             had_high_panic = df['Spread'].tail(5).max() > 8.0
             
             # --- 动能触发状态 ---
-            bottom_active = is_death_cross and had_high_panic
+            bottom_active = is_death_cross and had_high_panic and (df['^VIX'].iloc[-1] < 35)
             top_active = (current_spread < 2.0) or (is_golden_cross and current_spread > 7.5)
             
             # -----------------------------------------------------------------
