@@ -657,13 +657,13 @@ switches = [
 # 综合判断当前系统状态
 bottom_score = sum([1 for s in switches if s["bottom_active"]])
 top_score = sum([1 for s in switches if s["top_active"]])
-neutral_score = 5 - bottom_score - top_score
+neutral_score = len(switches) - bottom_score - top_score  # 使用 len(switches) 动态计算，完美解决漏算硬伤
 
 if top_score >= 3 and top_score >= bottom_score:
     status_color = "red"
     action_title = "🚨 【红色防御：触发系统性风控见顶逃顶线】"
     action_text = (
-        f"<b>大盘底层资金面诊断</b>：当前系统 5 大核心开关中有 <b>{top_score}</b> 项联合拉响见顶警报，市场呈现极度贪婪或高位严重分裂！<br>"
+        f"<b>大盘底层资金面诊断</b>：当前系统 {len(switches)} 大核心开关中有 <b>{top_score}</b> 项联合拉响见顶警报，市场呈现极度贪婪或高位严重分裂！<br>"
         "做市商Gamma敞口恶化引发追跌放大效应，配合暗池主力高位派发及多头边际买盘枯竭。此时必须<b>全面收紧个股诊断模型的止盈线</b>，"
         "转入全面战略防御，严控多头杠杆。"
     )
@@ -671,7 +671,7 @@ elif bottom_score >= 3 and bottom_score >= top_score:
     status_color = "green"
     action_title = "🚀 【绿色共振：底部恐慌宣泄枯竭，触发拐点重仓抄底】"
     action_text = (
-        f"<b>大盘底层资金面诊断</b>：当前系统 5 大核心开关中有 <b>{bottom_score}</b> 项指标达成共振，黄金左侧买点确立！<br>"
+        f"<b>大盘底层资金面诊断</b>：当前系统 {len(switches)} 大核心开关中有 <b>{bottom_score}</b> 项指标达成共振，黄金左侧买点确立！<br>"
         "做市商Gamma转正提供防护，暗池机构大单托底，且离岸高杠杆和系统性CTA抛压均已砸至历史冰点。多头精准抄底模式全面启动，"
         "建议结合个股的 Expected Value 与 Random Forest 模型全力捕捉大盘错杀的EV红利股。"
     )
