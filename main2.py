@@ -692,18 +692,20 @@ for i, s in enumerate(switches):
             <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eee;">
             <p style="margin: 2px 0; font-size:10pt;"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
             <p style="margin: 2px 0 6px 0; font-size:9.5pt;"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></p>
-            
-            <details style="margin: 10px 0; background-color: #f8f9fa; border-radius: 6px; border: 1px solid #e0e0e0; overflow: hidden;">
-                <summary style="cursor: pointer; padding: 8px 10px; font-size: 9.5pt; font-weight: bold; color: #2c3e50; outline: none; background-color: #f4f6f7; user-select: none;">
-                    🔘 点击展开：多空防守边界逻辑
-                </summary>
-                <div style="padding: 10px; border-top: 1px solid #e0e0e0; background-color: #ffffff;">
-                    <p style="margin: 0 0 6px 0; font-size: 9.5pt; line-height: 1.5;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
-                    <p style="margin: 0; font-size: 9.5pt; line-height: 1.5;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
-                </div>
-            </details>
-            
-            <p style="margin: 5px 0 0 0; color: #7f8c8d; font-size: 8.5pt;">🧭 数据来源: {s['source']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("🔘 点击展开：多空防守边界逻辑", expanded=False):
+            st.markdown(f"""
+            <div style="padding: 10px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #ffffff;">
+                <p style="margin: 0 0 8px 0; font-size: 9.5pt; line-height: 1.5;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
+                <p style="margin: 0; font-size: 9.5pt; line-height: 1.5;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div style="margin: 5px 0 15px 0; color: #7f8c8d; font-size: 8.5pt;">
+            🧭 数据来源: {s['source']}
             {metadata_line}
         </div>
         """, unsafe_allow_html=True)
@@ -894,3 +896,4 @@ with tab6:
             st.plotly_chart(fig_vx_ratio, use_container_width=True)
     else:
         st.warning("⚠️ VXN-VIX 科技前哨模块数据未激活或加载失败。")
+
