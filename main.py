@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 # 1. 页面基本配置与全局样式
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="NDX/QQQ 宏观情绪与微观结构见底六个开关看板",
+    page_title="Sentinel 2.0: 大盘资金底层逻辑（抄底与逃顶）双向风控系统",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -30,359 +30,869 @@ st.markdown("""
         margin-bottom: 15px;
         border-left: 5px solid #cccccc;
     }
-    .status-active { border-left-color: #2ecc71; background-color: #f4fbf7; }
-    .status-inactive { border-left-color: #e74c3c; background-color: #fdf5f5; }
-    .status-warning { border-left-color: #f39c12; background-color: #fef9f1; }
-    .status-info { border-left-color: #3498db; background-color: #f0f7fc; }
+    .status-bottom-active { border-left-color: #2ecc71; background-color: #f4fbf7; }
+    .status-top-active { border-left-color: #e74c3c; background-color: #fdf5f5; }
+    .status-neutral { border-left-color: #3498db; background-color: #f0f7fc; }
     
-    .badge {
-        padding: 3px 8px;
-        border-radius: 4px;
-        font-weight: bold;
-        font-size: 12px;
-        display: inline-block;
-    }
-    .badge-healthy { background-color: #2ecc71; color: white; }
-    .badge-bottom { background-color: #3498db; color: white; }
-    .badge-warning { background-color: #f39c12; color: white; }
-    .badge-exit { background-color: #e74c3c; color: white; }
+    .badge-bottom { background-color: #2ecc71; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
+    .badge-top { background-color: #e74c3c; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
+    .badge-info { background-color: #3498db; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. 数据获取与处理模块 (Data Pipeline)
+# 2. 数据获取与处理模块 (Data Pipeline & Timestamp Injection)
 # -----------------------------------------------------------------------------
+
+def filter_leveraged_etfs(ticker_list):
+    """
+    内置杠杆ETF及反向ETF特殊过滤逻辑，
+    清洗诊断列队中的高损耗及反向衍生品，确保底层指标纯净度。
+    """
+    known_lev_etfs = {'TQQQ', 'SQQQ', 'UPRO', 'SPXU', 'SOXL', 'SOXS', 'FAS', 'FAZ', 'YINN', 'YANG', 'UVXY', 'VIXY', 'SPXL'}
+    return [ticker for ticker in ticker_list if str(ticker).upper() not in known_lev_etfs]
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
-    """开关2：获取VIX期限结构代理（VIX现货 vs VIX 3个月远期）"""
     try:
         tickers = yf.Tickers('^VIX ^VIX3M')
-        hist = tickers.history(period='5d')
-        if not hist.empty:
-            vix = hist['Close']['^VIX'].iloc[-1]
-            vix3m = hist['Close']['^VIX3M'].iloc[-1]
+        hist = tickers.history(period='3mo')  
+        if not hist.empty and 'Close' in hist.columns:
+            close_data = hist['Close'].ffill().copy()
+            close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
+        
+            vix = close_data['^VIX'].iloc[-1]
+            vix3m = close_data['^VIX3M'].iloc[-1]
+            
+            if np.isnan(vix): vix = close_data['^VIX'].dropna().iloc[-1]
+            if np.isnan(vix3m): vix3m = close_data['^VIX3M'].dropna().iloc[-1]
+                
             ratio = vix3m / vix
-            status = "Contango (健康/见底)" if ratio > 1.0 else "Backwardation (恐慌/预警)"
-            is_active = ratio > 1.0
-            return {"vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3), "status": status, "active": is_active, "error": False}
+            
+            prev_ratio = 1.0
+            valid_ratios = close_data['Ratio'].dropna()
+            if len(valid_ratios) >= 2:
+                prev_ratio = valid_ratios.iloc[-2]
+          
+            bottom_active = (prev_ratio <= 1.0) and (ratio > 1.0)
+            top_active = ((prev_ratio >= 1.0) and (ratio < 1.0)) or (ratio > 1.24)
+  
+            # 转义符号：修复 HTML 前端吞噬 < 和 > 标签的致命 Bug
+            if bottom_active:
+                vix_ratio_diag = f"【比率跨线修复】比率自昨日({prev_ratio:.3f})&lt;=1向上突破为今日({ratio:.3f})&gt;1。结构由倒挂发生多头逆转修复。"
+            elif (prev_ratio >= 1.0) and (ratio < 1.0):
+                vix_ratio_diag = f"【比率自满破位】比率自昨日({prev_ratio:.3f})&gt;=1跌破至今日({ratio:.3f})&lt;1，牛市高位期限结构基础松动。"
+            elif ratio > 1.24:
+                vix_ratio_diag = f"【比率极限超载】当前比率({ratio:.3f})冲破1.24绝对高线，期权做空波动率策略极度拥挤，高度自满。"
+            elif ratio <= 1.0:
+                vix_ratio_diag = f"【比率持续倒挂】当前比率({ratio:.3f})&lt;=1持续低于平衡线，系统流动性仍处于撕裂出清的冰点观察期。"
+            elif 1.20 <= ratio <= 1.24:
+                vix_ratio_diag = f"【比率高位自满】当前比率({ratio:.3f})处于1.20-1.24敏感高位带，市场多头自满情绪常规化积压。"
+            else:
+                vix_ratio_diag = f"【比率常态均衡】当前比率({ratio:.3f})在Contango常态中轴稳健运行，期限结构保持常态健康。"
+
+            if vix >= 24.0:
+                vix_spot_diag = f"【现货恐慌爆发】当前VIX现货飙升至 {vix:.2f}，突破24.0恐慌红线，市场恐慌共振剧烈，宣泄抛压进行时。"
+            elif vix < 13.5:
+                vix_spot_diag = f"【现货极低自满】当前VIX现货极低为 {vix:.2f} (&lt;13.5)，期权空头完全无防备过度乐观，需严防黑天鹅异变。"
+            else:
+                vix_spot_diag = f"【现货常态理性】当前VIX现货为 {vix:.2f}，处于13.5-24.0的合理宽幅震荡区间，大盘暂无突发性异动风险。"
+
+            if bottom_active:
+                if vix >= 24.0:
+                    vix_diag_status = "🚀 黄金抄底：现货高位恐慌 ✖ 期限比率完美修复"
+                else:
+                    vix_diag_status = "🟢 抄底激活：期限比率率先跨线上破平衡线"
+            elif top_active:
+                if ratio > 1.24 and vix < 13.5:
+                    vix_diag_status = "🚨 极度逃顶：现货极限自满 ✖ 比率升水极度超载"
+                else:
+                    vix_diag_status = "🚨 风控激活：比率高位超载或情绪转弱筑顶逆转"
+            else:
+                if ratio <= 1.0 and vix >= 24.0:
+                    vix_diag_status = "🔴 严重防御：期限持续倒挂 ✖ 现货强恐慌宣泄"
+                elif ratio <= 1.0:
+                    vix_diag_status = "🟡 风险提示：期限结构深陷持续倒挂冰点期"
+                elif 1.20 <= ratio <= 1.24:
+                    if vix < 13.5:
+                        vix_diag_status = "🟡 风险提示：双重自满情绪严重积压（建议收紧止盈线）"
+                    else:
+                        vix_diag_status = "🟡 风险提示：市场多头自满情绪常态化积压"
+                else:
+                    if vix < 13.5:
+                        vix_diag_status = "🟡 风险提示：现货隐含波动率极低，保留左侧防备"
+                    else:
+                        vix_diag_status = "🟢 状态中性：健康均衡牛市状态"
+            
+            return {
+                "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3), "prev_ratio": round(prev_ratio, 3),
+                "bottom_active": bottom_active, "top_active": top_active, "error": False,
+                "vix_diag_status": vix_diag_status,
+                "vix_ratio_diag": vix_ratio_diag,
+                "vix_spot_diag": vix_spot_diag,
+                "df": close_data.tail(60),
+                "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
     except Exception as e:
-        return {"error": True, "msg": str(e), "active": False}
-    return {"error": True, "msg": "No data", "active": False}
+        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
+    return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
 
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
-    """开关3：获取加密货币资产永续合约资金费率与OI趋势"""
     try:
-        # OKX 获取资金费率 (BTC-USDT 永续)
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
-        
         if fr_res.get("code") != "0":
-            return {"error": True, "msg": "OKX API 响应异常", "active": False}
+            return {"error": True, "msg": "OKX API 异常", "bottom_active": False, "top_active": False, "fetched_at": "API错误"}
             
-        # 提取资金费率并转为百分比
-        funding_rate = float(fr_res['data'][0]['fundingRate']) * 100 
+        funding_rate = float(fr_res['data'][0]['fundingRate']) * 100
         
-        # OKX 获取当前未平仓量(OI)
         oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
         oi_res = requests.get(oi_url, timeout=5).json()
-        
         if oi_res.get("code") != "0":
-            return {"error": True, "msg": "获取 OI 数据异常", "active": False}
+            return {"error": True, "msg": "获取 OI 数据异常", "bottom_active": False, "top_active": False, "fetched_at": "API错误"}
             
-        # 提取未平仓量（以 USDT 计价）
         open_interest = float(oi_res['data'][0]['oiCcy'])
         
-        # 逻辑：费率转正(>= 0.0)视为企稳
-        is_active = funding_rate >= 0.0
-        status = "资金费率转正 + OI企稳" if is_active else "费率倒挂或情绪悲观"
+        hist_df = None
+        prev_funding_rate = 0.0
+        try:
+            hist_url = "https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=60"
+            hist_res = requests.get(hist_url, timeout=5).json()
+            if hist_res.get("code") == "0":
+                text_data = hist_res['data']
+                hist_df = pd.DataFrame(text_data)
+                hist_df['fundingTime'] = pd.to_datetime(hist_df['fundingTime'].astype(float), unit='ms')
+                hist_df['fundingRate'] = hist_df['fundingRate'].astype(float) * 100
+                hist_df = hist_df.sort_values('fundingTime')
+                
+                if len(hist_df) >= 2:
+                    prev_funding_rate = hist_df.iloc[-2]['fundingRate']
+        except:
+            pass  
+        
+        bottom_active = (prev_funding_rate < 0) and (funding_rate > 0)
+        top_active = funding_rate >= 0.01
         
         return {
-            "funding_rate": f"{funding_rate:.4f}%",
+            "funding_rate": f"{funding_rate:.4f}%", 
+            "prev_funding_rate": f"{prev_funding_rate:.4f}%",
             "oi": f"{open_interest:,.0f}",
-            "status": status,
-            "active": is_active,
-            "error": False
+            "bottom_active": bottom_active, 
+            "top_active": top_active, 
+            "error": False,
+            "hist_df": hist_df,
+            "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     except Exception as e:
-        return {"error": True, "msg": str(e), "active": False}
+        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "网络穿透异常"}
 
 @st.cache_data(ttl=3600)
 def fetch_squeezemetrics_data():
-    """开关1 & 开关5：获取 SqueezeMetrics 的 DIX 和 GEX 数据（带24小时本地缓存与UA伪装机制）"""
-    # 💡 核心修复：修改为官方正确的静态数据大写地址
-    url = "https://squeezemetrics.com/monitor/static/DIX.csv" 
+    url = "https://squeezemetrics.com/monitor/static/DIX.csv"
     cache_file = "dix_cache.csv"
-    cooldown_seconds = 24 * 60 * 60  # 24 小时下载冷却时间
-    
+    cooldown_seconds = 4 * 60 * 60
     should_download = True
     
-    # 1. 检查本地缓存是否存在及是否在冷却时间内
     if os.path.exists(cache_file):
         file_age = time.time() - os.path.getmtime(cache_file)
         if file_age < cooldown_seconds:
             should_download = False
-            st.sidebar.info(f"📊 DIX/GEX 使用24h内本地缓存 (已存活: {int(file_age/3600)}小时)")
             
     if should_download:
         try:
-            # 2. 模拟真实浏览器 Headers 绕过基本防火墙
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             }
             response = requests.get(url, headers=headers, timeout=15)
             if response.status_code == 200 and "dix" in response.text.lower():
                 with open(cache_file, "w", encoding="utf-8") as f:
                     f.write(response.text)
-                st.sidebar.success("🔄 DIX/GEX 官方真实数据已成功刷新并写入本地缓存！")
-            else:
-                st.sidebar.warning(f"⚠️ 官网响应异常(状态码:{response.status_code})，将使用历史本地缓存。")
-        except Exception as e:
-            st.sidebar.warning(f"⚠️ 无法连接 SqueezeMetrics 官网 ({e})，将尝试读取历史本地缓存。")
+        except Exception:
+            pass
             
-    # 3. 多重容错保障与解析逻辑
     if os.path.exists(cache_file):
         try:
             df = pd.read_csv(cache_file)
             if not df.empty:
-                # 💡 稳健性优化：将所有列名强制转换为小写，防止因官方表头是大写（DATE, DIX, GEX）导致后续代码 KeyError
                 df.columns = df.columns.str.lower()
-                
                 latest = df.iloc[-1]
                 dix_val = float(latest['dix'])
-                # 如果 csv 里是 0.45 这样的绝对小数，换算成百分比 45.0
-                if dix_val < 1.0:
-                    dix_val = dix_val * 100
+                if dix_val < 1.0: dix_val = dix_val * 100
                 gex_val = float(latest['gex'])
                 
+                file_time = datetime.datetime.fromtimestamp(os.path.getmtime(cache_file)).strftime('%Y-%m-%d %H:%M:%S')
+                
                 return {
-                    "dix": round(dix_val, 2),
-                    "gex": int(gex_val),
-                    "dix_active": dix_val >= 45.0,
-                    "gex_active": gex_val > 0,
-                    "error": False,
-                    "df": df.tail(100),
-                    "is_mock": False
+                    "dix": round(dix_val, 2), "gex": int(gex_val),
+                    "error": False, "df": df.tail(100), "is_mock": False,
+                    "fetched_at": file_time
                 }
-        except Exception as e:
-            st.sidebar.error(f"❌ 解析本地缓存文件失败: {e}")
+        except Exception:
+            pass
 
-    # 4. 终极兜底机制：若无任何本地缓存或读取失败，自动生成模拟数据保证 UI 不崩溃
     dates = pd.date_range(end=datetime.date.today(), periods=100)
     mock_df = pd.DataFrame({
-        'date': dates,
-        'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,  # 围绕 44% 波动
+        'date': dates, 'dix': np.sin(np.linspace(0, 10, 100)) * 3 + 44,
         'gex': np.random.normal(loc=500000000, scale=1000000000, size=100)
     })
     latest = mock_df.iloc[-1]
     return {
-        "dix": round(latest['dix'], 2), 
-        "gex": int(latest['gex']),
-        "dix_active": latest['dix'] >= 45.0, 
-        "gex_active": latest['gex'] > 0,
-        "error": False, 
-        "df": mock_df, 
-        "is_mock": True
+        "dix": round(latest['dix'], 2), "gex": int(latest['gex']),
+        "error": False, "df": mock_df, "is_mock": True,
+        "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + " (兜底)"
     }
 
-@st.cache_data(ttl=3600)
-def calculate_cta_and_correlation():
-    """开关4 & 开关6：通过常规指数计算CTA抛压动量代理与全局相关性见顶回落代理"""
+@st.cache_data(ttl=14400)
+def fetch_cboe_official_history(symbol):
     try:
-        tickers = ['QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL']
-        data = yf.download(tickers, period='6mo', progress=False)['Close']
+        url = f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        df = pd.read_csv(url)
+        df.columns = df.columns.str.lower()
+        date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
+        df['date'] = pd.to_datetime(df[date_col])
+        df.set_index('date', inplace=True)
+        df = df.sort_index()
+        return df['close']
+    except Exception:
+        return pd.Series()
+
+@st.cache_data(ttl=3600)
+def calculate_quant_and_breadth_signals():
+    try:
+        raw_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
+        yf_tickers = filter_leveraged_etfs(raw_tickers)
         
-        qqq = data['QQQ']
-        ma200 = qqq.rolling(200).mean()
+        yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
+        yf_data = yf_data.ffill()
+        latest = yf_data.iloc[-1]
         
-        latest_price = qqq.iloc[-1]
-        latest_ma200 = ma200.iloc[-1] if not ma200.isna().all() else latest_price * 1.05
-        dist_to_200 = (latest_price - latest_ma200) / latest_ma200
+        data = yf_data[['QQQ', 'SPY', 'IWM', 'RSP']].copy()
         
-        cta_active = dist_to_200 > -0.15 
+        corr_official = fetch_cboe_official_history('COR1M')
+        dspx_official = fetch_cboe_official_history('DSPX')
         
-        returns = data.pct_change().dropna()
-        corrs = []
-        for t in tickers[1:]:
-            if t in returns.columns:
-                c = returns['QQQ'].rolling(20).corr(returns[t]).iloc[-1]
-                corrs.append(c)
-        avg_corr = np.mean(corrs) if corrs else 0.85
+        if not corr_official.empty:
+            corr_series = corr_official.reindex(data.index)
+            if np.isnan(corr_series.iloc[-1]) or corr_series.tail(10).max() == corr_series.tail(10).min():
+                corr_series.iloc[-1] = latest.get('^COR1M', corr_series.dropna().iloc[-1] if not corr_series.dropna().empty else 17.8)
+            corr_series = corr_series.ffill()
+        else:
+            corr_series = yf_data['^COR1M']
+            
+        if not dspx_official.empty:
+            dspx_series = dspx_official.reindex(data.index)
+            if np.isnan(dspx_series.iloc[-1]):
+                dspx_series.iloc[-1] = latest.get('^DSPX', dspx_series.dropna().iloc[-1] if not dspx_series.dropna().empty else 40.0)
+            dspx_series = dspx_series.ffill()
+        else:
+            dspx_series = yf_data['^DSPX']
+
+        # CTA 动向追踪
+        cta_shorts_series = pd.Series(0, index=data.index)
+        cta_longs_series = pd.Series(0, index=data.index)
+        for idx_name in ['QQQ', 'SPY', 'IWM']:
+            price = data[idx_name]
+            ma21 = price.rolling(21).mean()
+            ma63 = price.rolling(63).mean()
+            ma126 = price.rolling(126).mean()
+            short_mask = (price < ma21) & (price < ma63) & (price < ma126) & ((price - ma21) / ma21 < -0.04)
+            long_mask = (price > ma21) & (price > ma63) & (price > ma126) & ((price - ma21) / ma21 > 0.04)
+            cta_shorts_series += short_mask.astype(int)
+            cta_longs_series += long_mask.astype(int)
+
+        cta_shorts_exhausted = cta_shorts_series.iloc[-1]
+        cta_longs_exhausted = cta_longs_series.iloc[-1]
+        cta_bottom_active = cta_shorts_exhausted >= 2
+        cta_top_active = cta_longs_exhausted >= 2
         
-        prev_corr = 0.88 
-        corr_active = avg_corr < 0.80 and prev_corr >= 0.85
+        cta_status_text = "多头趋势/系统性买入中"
+        if cta_bottom_active: cta_status_text = "系统性空头抛压耗尽"
+        elif cta_top_active: cta_status_text = "系统性多头买盘枯竭"
+        elif cta_shorts_exhausted > 0 or cta_longs_exhausted > 0: cta_status_text = "CTA 动量分化调仓期"
+
+        # CBOE 交叉盘及动态分情况推演
+        corr_is_broken = corr_series.tail(10).max() == corr_series.tail(10).min()
+        corr_fast = corr_series.ewm(span=5, adjust=False).mean()
+        corr_slow = corr_series.ewm(span=21, adjust=False).mean()
+        corr_q75 = corr_series.rolling(126).quantile(0.75) 
+        corr_q25 = corr_series.rolling(126).quantile(0.25)
+         
+        dsp_fast = dspx_series.ewm(span=5, adjust=False).mean()
+        dsp_slow = dspx_series.ewm(span=21, adjust=False).mean()
+        
+        c_spot, c_f, c_s = corr_series.iloc[-1], corr_fast.iloc[-1], corr_slow.iloc[-1]
+        d_spot, d_f, d_s = dspx_series.iloc[-1], dsp_fast.iloc[-1], dsp_slow.iloc[-1]
+        
+        corr_mean = corr_series.rolling(60).mean().iloc[-1]
+        corr_std = corr_series.rolling(60).std().iloc[-1]
+        dspx_mean = dspx_series.rolling(60).mean().iloc[-1]
+        dspx_std = dspx_series.rolling(60).std().iloc[-1]
+        
+        c_z = (c_spot - corr_mean) / corr_std if corr_std > 0 else 0
+        d_z = (d_spot - dspx_mean) / dspx_std if dspx_std > 0 else 0
+
+        c_is_high = c_z > 1.0 or c_s > corr_q75.iloc[-1]
+        c_is_low = c_z < -1.0 or c_s < corr_q25.iloc[-1]
+        c_dead_cross = c_f < c_s
+        c_golden_cross = c_f > c_s
+        
+        d_is_high = d_z > 1.0 or d_f > d_s
+        d_is_low = d_z < -1.0 or d_f < d_s
+        
+        market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
+        
+        if corr_is_broken:
+            corr_diag, disp_diag, combined_diag = "流断裂", "流断裂", "数据断层"
+            corr_bottom_active = breadth_top_active = False
+        else:
+            if c_golden_cross: corr_diag = f"【相关性升温(Z:{c_z:.1f})】全市场同涨同跌共振加剧"
+            else: corr_diag = f"【相关性退潮(Z:{c_z:.1f})】市场共振消退，逐步回归理性"
+            
+            if d_is_high: disp_diag = f"【离散度分化发散(Z:{d_z:.1f})】两极分化加剧，抱团失血效应显著"
+            else: disp_diag = f"【离散度收敛(Z:{d_z:.1f})】板块轮动均衡，非极端撕裂期"
+
+            corr_bottom_active = c_is_high and c_dead_cross and not d_is_high
+            breadth_top_active = market_high and c_is_low and d_is_high
+            
+            if c_golden_cross and d_is_high:
+                combined_diag = "⚡ 【象限 I: 双高危机】宏观剧震引发系统流动性冲击与内部结构剧烈撕裂并发（观望，严防无差别闪崩）"
+            elif c_golden_cross and not d_is_high:
+                combined_diag = "🔥 【象限 II: 泥沙俱下】纯粹的同频无差别恐慌抛售，相关性极高（等待 CBOE 快慢线死叉即可抄底）"
+            elif c_dead_cross and d_is_high:
+                combined_diag = "🚨 【象限 III: 极致撕裂】大盘失真，资金极致抱团超级权重，掩护中小盘出货（触发终极广度逃顶线）"
+            else:
+                combined_diag = "⏳ 【象限 IV: 均衡收敛】常态低波运行，系统性风险真空期，个股特异性健康回归"
+
+        cboe_corr_text = f"相关性:{c_spot:.2f}(Z:{c_z:.1f})"
+        cboe_disp_text = f"离散度:{d_spot:.2f}(Z:{d_z:.1f})"
+        spy_rsp_ratio = latest['SPY'] / latest['RSP']
+        
+        df_hist = pd.DataFrame(index=data.index)
+        df_hist['corr'] = corr_series
+        df_hist['corr_fast'] = corr_fast
+        df_hist['corr_slow'] = corr_slow
+        df_hist['dspx'] = dspx_series
+        df_hist['dsp_fast'] = dsp_fast
+        df_hist['dsp_slow'] = dsp_slow
+        df_hist['cta_shorts'] = cta_shorts_series
+        df_hist['cta_longs'] = cta_longs_series
         
         return {
-            "dist_to_200": f"{dist_to_200*100:.2f}%",
-            "avg_corr": round(avg_corr, 2),
-            "cta_active": cta_active,
-            "corr_active": corr_active,
-            "error": False
+            "error": False,
+            "cta_status": cta_status_text,
+            "cboe_corr": cboe_corr_text,
+            "cboe_disp": cboe_disp_text,
+            "spy_rsp_ratio": round(spy_rsp_ratio, 4),
+            "cta_bottom_active": cta_bottom_active,
+            "cta_top_active": cta_top_active,
+            "corr_bottom_active": corr_bottom_active,
+            "breadth_top_active": breadth_top_active,
+            "corr_is_broken": corr_is_broken,
+            "corr_diag": corr_diag,          
+            "disp_diag": disp_diag,      
+            "combined_diag": combined_diag,  
+            "df_hist": df_hist.tail(60)
         }
     except Exception as e:
-        return {"error": True, "msg": str(e), "cta_active": False, "corr_active": False}
+        return {
+            "error": True, "msg": str(e), 
+            "cta_bottom_active": False, "cta_top_active": False,
+            "corr_bottom_active": False, "breadth_top_active": False,
+            "corr_diag": "诊断异常", "disp_diag": "诊断异常", "combined_diag": "诊断异常"
+        }
+        
+@st.cache_data(ttl=3600)
+def fetch_vxn_vix_data():
+    try:
+        tickers = yf.Tickers('^VXN ^VIX')
+        hist = tickers.history(period='3mo')
+        
+        if not hist.empty and 'Close' in hist.columns:
+            df = hist['Close'].ffill().copy()
+            
+            df['Spread'] = df['^VXN'] - df['^VIX']
+            df['Ratio'] = df['^VXN'] / df['^VIX']
+            
+            df['Spread_Fast'] = df['Spread'].ewm(span=5, adjust=False).mean()
+            df['Spread_Slow'] = df['Spread'].ewm(span=21, adjust=False).mean()
+            
+            current_spread = df['Spread'].iloc[-1]
+            current_ratio = df['Ratio'].iloc[-1]
+            fast_curr = df['Spread_Fast'].iloc[-1]
+            slow_curr = df['Spread_Slow'].iloc[-1]
+            
+            fast_prev = df['Spread_Fast'].iloc[-2] if len(df) >= 2 else fast_curr
+            slow_prev = df['Spread_Slow'].iloc[-2] if len(df) >= 2 else slow_curr
+            vix_spot = df['^VIX'].iloc[-1]
+            
+            is_death_cross = (fast_prev >= slow_prev) and (fast_curr < slow_curr)
+            is_golden_cross = (fast_prev <= slow_prev) and (fast_curr > slow_curr)
+            had_high_panic = df['Spread'].tail(5).max() > 8.0
+            
+            bottom_active = is_death_cross and had_high_panic and (vix_spot < 35.0)
+            volcano_active = (current_spread > 7.5 or current_ratio > 1.35) and (fast_curr > slow_curr)
+            storm_prep_active = (current_spread < 3.0 or current_ratio < 1.10) and is_golden_cross
+            
+            top_active = volcano_active or storm_prep_active
 
+            if is_death_cross:
+                spread_diag = f"【高位死叉】快线({fast_curr:.2f})下穿慢线({slow_curr:.2f})。波动率溢价回落，恐慌出清。"
+            elif is_golden_cross:
+                spread_diag = f"【低位金叉】快线({fast_curr:.2f})上穿慢线({slow_curr:.2f})。波动率动能放大，警惕分化。"
+            elif fast_curr < slow_curr:
+                spread_diag = f"【动能收敛】快线运行于慢线下方，科技股溢价风险维持常态化修复。"
+            else:
+                spread_diag = f"【动能发散】快线运行于慢线上方，科技股情绪溢价处于风险积聚期。"
+                
+            if current_ratio > 1.35:
+                ratio_diag = f"【极端过热】比率({current_ratio:.2f})突破1.35。纳指多头对冲严重踩踏，极度拥挤。"
+            elif current_ratio < 1.10:
+                ratio_diag = f"【过度自满】比率({current_ratio:.2f})跌破1.10。市场极度懈怠，隐性筑顶风险剧增。"
+            else:
+                ratio_diag = f"【常态均衡】比率({current_ratio:.2f})在健康区间，风格资产未出现单边撕裂。"
+
+            if bottom_active:
+                combined_diag = "🚀 【黄金右侧】科技股恐慌见顶！现货全面进场，严禁做空！"
+            elif volcano_active:
+                combined_diag = "🌋 【火山口】独立踩踏发散中！触发多头硬熔断，严禁接飞刀！"
+            elif storm_prep_active:
+                combined_diag = "🌀 【前哨预警】极度自满打破，低位动能金叉！开始战略减仓科技多头！"
+            else:
+                if current_ratio < 1.10:
+                    combined_diag = "🟡 【隐性风险】极度自满，期权对冲完全懈怠，隐含被动洗盘风险。"
+                else:
+                    combined_diag = "🟢 【常态牛市】情绪均衡。多头 EV 模型正常运转，拥抱趋势。"
+            
+            return {
+                "current_spread": round(current_spread, 2),
+                "current_ratio": round(current_ratio, 2),
+                "fast_curr": round(fast_curr, 2),
+                "slow_curr": round(slow_curr, 2),
+                "bottom_active": bottom_active,
+                "top_active": top_active,
+                "error": False,
+                "combined_diag": combined_diag,
+                "spread_diag": spread_diag,
+                "ratio_diag": ratio_diag,
+                "df_hist": df,
+                "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+    except Exception as e:
+        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
+    return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
+    
 # -----------------------------------------------------------------------------
-# 3. 业务数据组装与状态判定
+# 3. 业务决策逻辑组装与元数据解析
 # -----------------------------------------------------------------------------
 vix_data = fetch_vix_data()
 crypto_data = fetch_crypto_signals()
 sm_data = fetch_squeezemetrics_data()
-quant_data = calculate_cta_and_correlation()
+quant_data = calculate_quant_and_breadth_signals()
+
+now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+vxn_vix_data = fetch_vxn_vix_data()
+
+if not sm_data["error"]:
+    gex_val = sm_data.get('gex', 0)
+    dix_val = sm_data.get('dix', 44.0)
+    
+    sm_bottom_active = (gex_val > 0) and (dix_val >= 45.0)
+    sm_top_active = (gex_val < 0) or (dix_val < 40.0)
+    
+    if sm_data.get("is_mock", False):
+        sm_status = "使用兜底数据 🟡"
+    elif sm_top_active:
+        sm_status = "🚨 风险重压：空头敞口/机构派发"
+    elif sm_bottom_active:
+        sm_status = "🟢 信号激活：Gamma护盘/暗池吸筹"
+    else:
+        sm_status = "⚪ 状态中性：主力资金中性均衡"
+else:
+    sm_bottom_active = False
+    sm_top_active = False
+    sm_status = "数据抓取失败 🔴"
+    gex_val, dix_val = 0, 0.0
 
 switches = [
     {
         "id": 1,
-        "name": "做市商 Gamma 翻回正值 (总开关)",
-        "active": sm_data["gex_active"] if not sm_data["error"] else False,
-        "value": f"GEX: {sm_data['gex']:,}" if not sm_data["error"] else "数据源异常",
-        "source": "SqueezeMetrics (Proxy for SPX/NDX)",
-        "interpretation": "抄底信号 / 核心防御线",
-        "interpretation_desc": "Gamma由负转正意味着做市商从'顺势砸盘/拉盘(Short Gamma)'转为'逆势稳定市场(Long Gamma)'。由于这是总开关，只要Gamma为负，大盘极易暴跌；翻正即代表左侧流动性危机解除，进入高胜率做市商护盘区间。",
-        "latency": "延迟（盘后更新，次日开盘前生效）",
-        "note": "注意防范盘中极端波动引起的突发性Gamma Flip（正变负）。"
+        "name": "做市商 Gamma & 暗池 DIX 联合资产开关",
+        "bottom_active": sm_bottom_active,
+        "top_active": sm_top_active,
+        "value": f"GEX: {gex_val:,} | DIX: {dix_val}%",
+        "source": "SqueezeMetrics (暗池吸筹指数 & SPX期权对冲敞口)",
+        "desc_bottom": "【双向合力买入】GEX为正建立行情的安全垫，且暗池DIX突破45%大关，说明华尔街主力在暗池疯狂吃单承接，左侧筑底概率极高。",
+        "desc_top": "【双向共振杀跌】GEX转负导致做市商变成砸盘放大器，或DIX跌破40%暴露出明牌拉升时主力在悄悄分批派发利润，高位极易闪崩。",
+        "fetched_status": sm_status,
+        "update_cycle": "每日更新 (美东盘后)",
+        "last_updated": now_str
     },
     {
         "id": 2,
-        "name": "VIX 期限结构回到 contango",
-        "active": vix_data["active"] if not vix_data["error"] else False,
-        "value": f"VIX3M/VIX: {vix_data.get('ratio', 'N/A')}",
-        "source": "CBOE 实时波动率远期曲线 (Yahoo Finance)",
-        "interpretation": "健康 / 情绪修复",
-        "interpretation_desc": "Contango(远期比近期贵)是正常的市场常态。当远期/近期比率重新大于1.0时，说明短期恐慌高潮已过，买入保护性看跌期权的资金开始撤退，波动率压制解除，有利于多头反扑。",
-        "latency": "实时 / 15分钟延迟",
-        "note": "在暴跌初期该指标往往迅速倒挂(Backwardation)，修复到Contango需要1-3个交易日的右侧确认。"
+        "name": "VIX 期限结构与情绪指标",
+        "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
+        "top_active": vix_data["top_active"] if not vix_data["error"] else False,
+        "value": f"今日比率: {vix_data.get('ratio', 'N/A')} (昨日: {vix_data.get('prev_ratio', 'N/A')}) | VIX现货: {vix_data.get('vix', 'N/A')}",
+        "source": "CBOE 波动率曲线",
+        "desc_bottom": "【抄底激活标准：比率升上1】当隐含波动率期限结构打破极度深度倒挂状态、向上收复平衡线时激活，标志着非理性抛售流动性枯竭，转入安全抄底期。",
+        "desc_top": "【逃顶激活标准：比率跌破1，或今日比率突破 >1.24】期限结构基石意外松动，或者Contango升水极度超载，显示风险资产做空波动率策略无脑拥挤，极易诱发多杀多踩踏性闪崩。",
+        "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
+            f"<b>当下状态：</b>{vix_data.get('vix_diag_status')}<br>"
+            f"<b>⚖️ 比率分项：</b>{vix_data.get('vix_ratio_diag')}<br>"
+            f"<b>📊 现货分项：</b>{vix_data.get('vix_spot_diag')}"
+        ),
+        "update_cycle": "盘中实时波动 (YF延迟)",
+        "last_updated": now_str
     },
     {
         "id": 3,
-        "name": "加密资金费率转正 + OI 企稳",
-        "active": crypto_data["active"] if not crypto_data["error"] else False,
-        "value": f"Rate: {crypto_data.get('funding_rate', 'N/A')} | OI: {crypto_data.get('oi', 'N/A')}",
+        "name": "加密离岸高杠杆流动性前哨",
+        "bottom_active": crypto_data["bottom_active"] if not crypto_data["error"] else False,
+        "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
+        "value": f"当前费率: {crypto_data.get('funding_rate', 'N/A')} (前值: {crypto_data.get('prev_funding_rate', 'N/A')}) | OI: {crypto_data.get('oi', 'N/A')}",
         "source": "OKX 永续合约 API",
-        "interpretation": "抄底信号 / 风险偏好回升",
-        "interpretation_desc": "加密市场作为全球离岸高杠杆流动性的前哨。当费率跌为负数（空头付利息给多头）后重新转正，伴随持仓量(OI)在低位横盘企稳，代表散户恐慌割肉盘结束，主力左侧资金重新建仓，多头杠杆力量恢复。",
-        "latency": "高频实时 (每几分钟更新)",
-        "note": "若OI在费率转正时出现爆发式无理智飙升，需警惕多头连环清算(Long Squeeze)的二次探底风险。"
+        "desc_bottom": "【抄底激活标准：费率由负转正】这代表空头爆仓踩踏结束，多头资金左侧重新建仓，是大盘恐慌盘出清的重要风向标。",
+        "desc_top": "【逃顶激活标准：费率 >= 0.01%】即资金费率突破轻微过热线且 OI 处于高位。这代表多头杠杆出现超载隐患，极易触发多杀多洗盘闪崩。",
+        "fetched_status": "数据抓取失败 🔴" if crypto_data["error"] else (
+            f"🚨 预警：触发逃顶标准，多头杠杆超载过热 (当前 {crypto_data.get('funding_rate')})" if crypto_data["top_active"] else (
+                f"🟢 激活：触发抄底标准，空头无脑割肉出清 (前值 {crypto_data.get('prev_funding_rate')} 转正为 {crypto_data.get('funding_rate')})" if crypto_data["bottom_active"] else (
+                    "⚪ 状态中性：离岸高杠杆状态稳定，当前费率未触发任何极端阈值"
+                )
+            )
+        ),
+        "update_cycle": "7x24小时 实时获取",
+        "last_updated": now_str
     },
     {
         "id": 4,
-        "name": "CTA 约800亿抛压耗尽",
-        "active": quant_data["cta_active"] if not quant_data["error"] else False,
-        "value": f"距200日线: {quant_data.get('dist_to_200', 'N/A')}",
-        "source": "投行模型代理 (基于趋势跟踪动量算法)",
-        "interpretation": "抄底信号 / 抛压枯竭",
-        "interpretation_desc": "系统化趋势基金(CTA)在跌破关键均线触发阈值时会执行无脑清算，通常极限抛压规模在几百亿美金。当大盘跌破均线出现缩量、或深幅偏离200日线后动量指标出现底背离，意味着CTA能卖的头寸均已清空，空头边际力量耗尽。",
-        "latency": "模型推算（具有1个交易日滞后性）",
-        "note": "由于无法直接看投行持仓，本指标为动量模型推算，需配合成交量萎缩来佐证卖盘枯竭。"
+        "name": "CTA 动量矩阵 (系统性抛压/买盘极值监测)",
+        "bottom_active": quant_data["cta_bottom_active"] if not quant_data["error"] else False,
+        "top_active": quant_data["cta_top_active"] if not quant_data["error"] else False,
+        "value": f"当前状态: {quant_data.get('cta_status', 'N/A')}",
+        "source": "基于 1M/3M/6M 动量偏离度演算",
+        "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约跟空抛压面临彻底耗尽。",
+        "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
+        "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
+            "🚨 警报：系统性买盘进入衰竭点" if quant_data["cta_top_active"] else (
+                "🟢 激活：系统性空头抛压触底耗尽" if quant_data["cta_bottom_active"] else f"⚪ 运行中：{quant_data.get('cta_status')}"
+            )
+        ),
+        "update_cycle": "盘中动态计算 (基于最新价)",
+        "last_updated": now_str
     },
     {
         "id": 5,
-        "name": "暗池 DIX 站上 45%",
-        "active": sm_data["dix_active"] if not sm_data["error"] else False,
-        "value": f"DIX: {sm_data.get('dix', 'N/A')}%",
-        "source": "SqueezeMetrics 暗池买入比例",
-        "interpretation": "抄底信号 / 机构悄悄吸筹",
-        "interpretation_desc": "DIX(Dark Pool Index)衡量暗池交易中非合规披露的买入订单比例。当DIX大幅站上45%甚至接近50%时，说明在明牌大跌、散户恐慌时，华尔街机构正在通过暗池大量低吸承接，属于极强力且经典的左侧见底信号。",
-        "latency": "延迟（盘后更新）",
-        "note": "机构吸筹周期可能长达1-2周，DIX高企不代表第二天立刻暴涨，而是锁定了底部下行空间。"
+        "name": "全局隐含相关性拐点与离散度爆发矩阵 (全象限版)",
+        "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
+        "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
+        "value": f"{quant_data.get('cboe_corr', 'N/A')} | {quant_data.get('cboe_disp', 'N/A')}",
+        "source": "CBOE COR1M / DSPX 联动矩阵 (微观导数交叉 ✖ 滚动Z-Score状态机)",
+        "desc_bottom": "【抄底激活：恐慌死叉✖撕裂收敛】当相关性极值冲顶后向下死叉确立（恐慌抛售衰退），且离散度未出现背离爆发时激活。此时大盘无差别抛压清空，回归估值红利期。",
+        "desc_top": "【逃顶激活：隐蔽自满✖抱团发散】当指数高位且相关性极弱（掩饰流动性干涸），但离散度暴拉金叉（极少数巨头拉盘掩护出货）时激活。此时大盘广度深度崩塌，触发终极防御。",
+        "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
+            f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#d35400;'>{quant_data.get('combined_diag', '无信息')}</div>"
+            f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
+            f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
+        ),
+        "update_cycle": "每日更新 (盘终结算)",
+        "last_updated": now_str
     },
     {
         "id": 6,
-        "name": "全局相关性见顶回落、离散度回归",
-        "active": quant_data["corr_active"] if not quant_data["error"] else False,
-        "value": f"Rolling Corr: {quant_data.get('avg_corr', 'N/A')}",
-        "source": "Cboe DSPX 离散度指数 / 核心权重股滚动相关性计算",
-        "interpretation": "健康 / 结构分化行情",
-        "interpretation_desc": "在恐慌崩盘阶段，市场相关性会无限趋近于1（所有人不计成本泥沙俱下地抛售）。当相关性从0.9以上的极端高位见顶回落，个股开始根据自身基本面分化（离散度上升），标志着无理智恐慌结束，聪明的选股资金重新入场。",
-        "latency": "实时 / 盘后复合计算",
-        "note": "相关性刚从高位回落时，盘面可能呈现震荡拉锯，而非V型反转。"
+        "name": "VXN-VIX 科技股雷达",
+        "bottom_active": vxn_vix_data["bottom_active"] if not vxn_vix_data["error"] else False,
+        "top_active": vxn_vix_data["top_active"] if not vxn_vix_data["error"] else False,
+        "value": f"Spread: {vxn_vix_data.get('current_spread', 'N/A')} | Ratio: {vxn_vix_data.get('current_ratio', 'N/A')} | 熔断风控实时检测",
+        "source": "CBOE 波动率剪刀差 & EMA 一阶导数交叉",
+        "desc_bottom": "【右侧出击】当剪刀差自高位（>8.0）回落，且微观动能死叉（EMA5 < EMA21）时激活。此时非对称踩踏结束，IV Crush 来临，是高弹性科技股胜率极高的反转买点。",
+        "desc_top": "【双重风控防御】① 火山口（单边踩踏）：极高位金叉发散，无条件熔断科技股多头；② 暴风雨前夜（隐性筑顶）：低位自满区间突发金叉，主力悄然买入 Put，需立刻收紧止盈或做空保护。",
+        "fetched_status": "数据抓取失败 🔴" if vxn_vix_data["error"] else (
+            f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#d35400;'>{vxn_vix_data.get('combined_diag', '无信息')}</div>"
+            f"<b>📊 微观动能：</b>{vxn_vix_data.get('spread_diag', '无信息')}<br>"
+            f"<b>📉 情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
+        ),
+        "update_cycle": "盘中实时波动 (YF延迟)",
+        "last_updated": now_str
     }
 ]
 
-active_count = sum([1 for s in switches if s["active"]])
+bottom_score = sum([1 for s in switches if s["bottom_active"]])
+top_score = sum([1 for s in switches if s["top_active"]])
+neutral_score = len(switches) - bottom_score - top_score 
 
-# -----------------------------------------------------------------------------
-# 4. Streamlit UI 渲染
-# -----------------------------------------------------------------------------
-
-st.title("🛡️ Sentinel 核心决策系统：大盘微观结构见底看板")
-st.subheader(f"数据快照时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-st.markdown("### 📊 综合大盘状态及应对措施")
-if active_count >= 5:
-    st.error(f"🚨 【极高胜率共振：极度抄底状态】(当前达成信号: {active_count}/6)")
-    action_plan = "**应对措施**：触发全面买入红线。总开关Gamma已转正，且暗池机构与加密杠杆完全出清。允许左侧分批重仓建仓，若此时结合 Expected Value 模型选出的个股，可调高仓位系数至 1.2-1.5 倍，优先配置被误杀的科技龙头（如高Beta的半导体/航天板块等），或直接加仓 QQQ/杠杆ETF（需开启特殊过滤逻辑）。"
-elif active_count >= 4:
-    st.success(f"✅ 【确认底部成型：抄底状态】(当前达成信号: {active_count}/6)")
-    action_plan = "**应对措施**：符合历史见底阈值。大盘基本止跌，做市商从砸盘者变为护盘者。可以开始建立多头底仓（30%-50%仓位）。此时应启动 Random Forest 模型，筛选出胜率（Win Rate）较高、EV为正且预期持股周期短的标的进行右侧确认介入。"
-elif active_count >= 2:
-    st.warning(f"⏳ 【信号震荡交汇：过渡/预警状态】(当前达成信号: {active_count}/6)")
-    action_plan = "**应对措施**：市场处于左侧探底或超跌反弹的锯齿形走势中。总开关若未转正，坚决不加大仓位。继续保持高现金流或对冲头寸。密切关注加密资金费率和暗池DIX是否率先异动，对个股诊断模型输入的标的采取‘严格分批、到价才买’的防守策略。"
+if top_score >= 3 and top_score >= bottom_score:
+    status_color = "red"
+    action_title = "🚨 【红色防御：触发系统性风控见顶逃顶线】"
+    action_text = (
+        f"<b>大盘底层资金面诊断</b>：当前系统 {len(switches)} 大核心开关中有 <b>{top_score}</b> 项联合拉响见顶警报，市场呈现极度贪婪或高位严重分裂！<br>"
+        "做市商Gamma敞口恶化引发追跌放大效应，配合暗池主力高位派发及多头边际买盘枯竭。此时必须<b>全面收紧个股诊断模型的止盈线</b>，"
+        "转入全面战略防御，严控多头杠杆。"
+    )
+elif bottom_score >= 3 and bottom_score >= top_score:
+    status_color = "green"
+    action_title = "🚀 【绿色共振：底部恐慌宣泄枯竭，触发拐点重仓抄底】"
+    action_text = (
+        f"<b>大盘底层资金面诊断</b>：当前系统 {len(switches)} 大核心开关中有 <b>{bottom_score}</b> 项指标达成共振，黄金左侧买点确立！<br>"
+        "做市商Gamma转正提供防护，暗池机构大单托底，且离岸高杠杆和系统性CTA抛压均已砸至历史冰点。多头精准抄底模式全面启动，"
+        "建议结合个股的 Expected Value 与 Random Forest 模型全力捕捉大盘错杀的EV红利股。"
+    )
 else:
-    st.info(f"❄️ 【风险未出清 / 顺势防御：逃顶或空仓状态】(当前达成信号: {active_count}/6)")
-    action_plan = "**应对措施**：微观见底信号严重不足。市场仍由做市商Short Gamma砸盘压力或CTA持续清算主导。切勿盲目猜底。严格执行限仓或分批定投防御性资产，对任何反弹持怀疑态度，警惕杠杆ETF（如TQQQ）的剧烈损耗，保持 Sentinel Bot 的严格风控止损线格式。"
+    status_color = "orange"
+    action_title = "⏳ 【黄色震荡：多空状态均衡交织，常规结构分化轮动】"
+    action_text = (
+        f"<b>大盘底层资金面诊断</b>：当前系统无极端单边共振信号（抄底激活:<b>{bottom_score}</b> | "
+        f"见顶风控:<b>{top_score}</b> | 状态中性:<b>{neutral_score}</b>）。"
+        "全市场流动性在巨头与权重股之间常规轮动，未形成系统性突变尾部风险。建议维持常态化均衡仓位，实施中性对冲策略，"
+        "持续对目标个股执行日线级别常规诊断。"
+    )
 
-st.info(action_plan)
+# -----------------------------------------------------------------------------
+# 4. Streamlit UI 界面绘制
+# -----------------------------------------------------------------------------
+st.title("🛡️ Sentinel 2.0 核心决策系统：大盘底层资金双向雷达")
+st.subheader(f"看板渲染时钟: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-st.markdown("### 🔌 见底六个开关状态实时追踪")
+st.markdown(f"""
+<div style="padding:15px; border-radius:8px; border-left: 6px solid {status_color}; background-color:#fafafa; margin-bottom:20px;">
+    <h4 style="color:{status_color}; margin:0 0 10px 0;">{action_title}</h4>
+    <p style="font-size:11pt; line-height:1.6; color:#333;">{action_text}</p>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("### 🔌 双向资金逻辑开关实时追踪")
 cols = st.columns(3)
 
 for i, s in enumerate(switches):
     with cols[i % 3]:
-        status_class = "status-active" if s["active"] else "status-inactive"
-        status_text = "🟢 已激活" if s["active"] else "🔴 未激活"
+        if s["top_active"]:
+            box_class = "status-top-active"
+            badge_html = f"<span class='badge-top'>🚨 风险预警</span>"
+        elif s["bottom_active"]:
+            box_class = "status-bottom-active"
+            badge_html = f"<span class='badge-bottom'>🟢 信号激活</span>"
+        else:
+            box_class = "status-neutral"
+            badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
         
+        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
+        
+        # 【防御拦截逻辑】：将文本中的 < 和 > 转义为安全的 HTML 实体 &lt; 和 &gt;，避免吞噬后续组件
+        safe_desc_bottom = s['desc_bottom'].replace('<', '&lt;').replace('>', '&gt;')
+        safe_desc_top = s['desc_top'].replace('<', '&lt;').replace('>', '&gt;')
+            
         st.markdown(f"""
-        <div class="metric-box {status_class}">
+        <div class="metric-box {box_class}">
             <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-size: 14pt; font-weight: bold; color: #2c3e50;">开关 {s['id']}: {s['name']}</span>
-                <span style="font-size: 11pt; font-weight: bold;">{status_text}</span>
+                <span style="font-size: 11pt; font-weight: bold; color: #2c3e50;">开关 {s['id']}: {s['name']}</span>
+                {badge_html}
             </div>
             <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eee;">
-            <p style="margin: 2px 0;"><b>当前数值/状态:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
-            <p style="margin: 2px 0;"><b>数据来源:</b> {s['source']}</p>
-            <p style="margin: 2px 0;"><b>信号风险标签:</b> <span class="badge badge-bottom">{s['interpretation']}</span></p>
-            <p style="margin: 2px 0; color: #7f8c8d; font-size: 9pt;">⏱️ <b>时效性:</b> {s['latency']}</p>
+            <p style="margin: 2px 0; font-size:10pt;"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
+            <p style="margin: 2px 0 6px 0; font-size:9.5pt;"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></p>
         </div>
         """, unsafe_allow_html=True)
-        
-        with st.expander(f"查看开关 {s['id']} 的深度解读与注意事项"):
-            st.markdown(f"""**微观原理**:\n{s['interpretation_desc']}""")
-            st.markdown(f"""⚠️ **注意事项/盲区**:\n{s['note']}""")
 
-st.markdown("### 📈 微观结构基础数据图表 (以DIX / GEX代理为例)")
-if not sm_data["error"]:
-    plot_df = sm_data["df"]
+        with st.expander("🔘 点击展开：多空防守边界逻辑", expanded=False):
+            st.markdown(f"""
+            <div style="padding: 10px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #ffffff;">
+                <p style="margin: 0 0 8px 0; font-size: 9.5pt; line-height: 1.5;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
+                <p style="margin: 0; font-size: 9.5pt; line-height: 1.5;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown(f"""
+        <div style="margin: 5px 0 15px 0; color: #7f8c8d; font-size: 8.5pt;">
+            🧭 数据来源: {s['source']}
+            {metadata_line}
+        </div>
+        """, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# 5. 纳指走势雷达引擎
+# -----------------------------------------------------------------------------
+st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
+
+@st.cache_data(ttl=1800)
+def fetch_ndx_chart_data():
+    df = yf.Ticker('^NDX').history(period='3mo')
+    return df
+
+ndx_data = fetch_ndx_chart_data()
+if not ndx_data.empty:
+    fig_ndx = go.Figure()
+    latest_ndx_close = float(ndx_data['Close'].iloc[-1])
     
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(
-        go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="暗池 DIX (%)", line=dict(color="#3498db", width=2)),
-        secondary_y=False,
-    )
-    fig.add_trace(
-        go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#2ecc71", width=1.5, dash='dash')),
-        secondary_y=True,
+    fig_ndx.add_trace(go.Scatter(
+        x=ndx_data.index, y=ndx_data['Close'], mode='lines', name='NDX 实际走势曲线', line=dict(color='#2980b9', width=2.5)
+    ))
+    
+    fig_ndx.add_hline(
+        y=latest_ndx_close, line_dash="solid", line_color="#2c3e50", 
+        annotation_text=f"动态实时收盘位 ({latest_ndx_close:,.2f})", annotation_position="top right"
     )
     
-    fig.update_layout(
-        title_text="暗池 DIX 与 做市商 GEX 近期趋势（见底共振观测）",
+    fig_ndx.add_hline(y=28500, line_dash="dash", line_color="#e74c3c", annotation_text="CTA 二次抛售加速位 (28,500)", annotation_position="bottom right")
+    fig_ndx.add_hline(y=26500, line_dash="dash", line_color="#c0392b", annotation_text="极端下影/二次冲洗 (26,500)", annotation_position="bottom right")
+    
+    fig_ndx.add_hrect(
+        y0=27200, y1=28000, line_width=0, fillcolor="#2ecc71", opacity=0.15,
+        annotation_text="核心承接区 (27,200 - 28,000)", annotation_position="inside top right"
+    )
+
+    data_min = float(ndx_data['Close'].min())
+    data_max = float(ndx_data['Close'].max())
+    y_range_min = data_min * 0.97
+    y_range_max = data_max * 1.03
+    
+    if 26500 >= data_min * 0.88 and 26500 <= data_max * 1.12:
+        y_range_min = min(y_range_min, 26500 * 0.99)
+    if 28500 >= data_min * 0.88 and 28500 <= data_max * 1.12:
+        y_range_max = max(y_range_max, 28500 * 1.01)
+
+    fig_ndx.update_layout(
+        title="Nasdaq 100 (^NDX) 阶梯支撑与洗盘推演 (智能自适应缩放)",
         template="plotly_white",
-        legend=dict(x=0.01, y=0.99)
+        yaxis=dict(title="NDX Index Points", range=[y_range_min, y_range_max], autorange=False, tickformat=",.0f"),
+        xaxis_rangeslider_visible=False, height=500, margin=dict(l=20, r=20, t=40, b=20)
     )
-    fig.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
-    fig.update_yaxes(title_text="<b>Gamma 绝对值大小</b>", secondary_y=True)
-    
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("基础图表数据源加载失败，无法渲染图表。")
+    st.plotly_chart(fig_ndx, use_container_width=True)
 
-st.markdown("""
----
-💡 **Sentinel 看板运维提示**：
-1. **OKX API** 无需 API Key 即可直接调用公共端点（代码中已直接对接，完美替代可能遭遇地区限制的 Binance）。
-2. **Yahoo Finance (`yfinance`)** 依仗网络通畅度，若在限制环境运行部署，请确保环境已配置全局网络代理。
-3. **SqueezeMetrics 反爬防线**：本版本已完整集成 24 小时 `dix_cache.csv` 文件级本地持久化冷却机制，最大程度规避因频繁高频刷页面触发的 `403 Forbidden` 风险。
-""")
+# -----------------------------------------------------------------------------
+# 6. 近期日线级别定量监控图表选项卡
+# -----------------------------------------------------------------------------
+st.markdown("---")
+st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
+
+all_tabs = st.tabs([
+    "TAB 1: 做市商 & 暗池", 
+    "TAB 2: VIX 期限结构", 
+    "TAB 3: 离岸高杠杆", 
+    "TAB 4: CTA 动量矩阵", 
+    "TAB 5: 相关性与离散度",
+    "TAB 6: VXN-VIX 科技剪刀差"
+])
+
+tab1 = all_tabs[0]
+tab2 = all_tabs[1]
+tab3 = all_tabs[2]
+tab4 = all_tabs[3]
+tab5 = all_tabs[4]
+tab6 = all_tabs[5]
+
+# --- TAB 1 ---
+with tab1:
+    if not sm_data["error"] and "df" in sm_data:
+        plot_df = sm_data["df"]
+        fig_sm = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_sm.add_trace(
+            go.Scatter(x=plot_df['date'], y=plot_df['dix'], name="暗池 DIX (%)", line=dict(color="#3498db", width=2)),
+            secondary_y=False,
+        )
+        fig_sm.add_trace(
+            go.Scatter(x=plot_df['date'], y=plot_df['gex'], name="做市商 GEX 净敞口", line=dict(color="#e74c3c", width=1.5, dash='dot')),
+            secondary_y=True,
+        )
+        fig_sm.update_layout(title_text="DIX 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
+        fig_sm.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
+        fig_sm.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
+        st.plotly_chart(fig_sm, use_container_width=True)
+    else:
+        st.warning("数据不可用。")
+
+# --- TAB 2 ---
+with tab2:
+    if not vix_data["error"] and "df" in vix_data:
+        v_df = vix_data["df"]
+        v_col1, v_col2 = st.columns(2)
+        with v_col1:
+            fig_vix_spot = go.Figure()
+            fig_vix_spot.add_trace(go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2)))
+            fig_vix_spot.add_hline(y=12.0, line_dash="dash", line_color="#c0392b", annotation_text="自满安全线 (12.0)")
+            fig_vix_spot.update_layout(title_text="图表 A: VIX 现货恐慌指数趋势", template="plotly_white", height=400)
+            st.plotly_chart(fig_vix_spot, use_container_width=True)
+        with v_col2:
+            fig_vix_ratio = go.Figure()
+            fig_vix_ratio.add_trace(go.Scatter(x=v_df.index, y=v_df['Ratio'], name="VIX3M / VIX 比率", line=dict(color="#9b59b6", width=2)))
+            fig_vix_ratio.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", annotation_text="Contango 线 (1.0)")
+            fig_vix_ratio.add_hline(y=1.24, line_dash="dash", line_color="#e74c3c", annotation_text="极端自满 (1.24)")
+            fig_vix_ratio.update_layout(title_text="图表 B: VIX3M / VIX 期限结构比率", template="plotly_white", height=400)
+            st.plotly_chart(fig_vix_ratio, use_container_width=True)
+
+# --- TAB 3 ---
+with tab3:
+    if not crypto_data["error"] and crypto_data.get("hist_df") is not None:
+        c_df = crypto_data["hist_df"]
+        fig_crypto = go.Figure()
+        fig_crypto.add_trace(go.Scatter(x=c_df['fundingTime'], y=c_df['fundingRate'], name="BTC 资金费率 (%)", line=dict(color="#f1c40f", width=2)))
+        fig_crypto.add_hline(y=0.0, line_dash="solid", line_color="#7f8c8d")
+        fig_crypto.add_hline(y=0.01, line_dash="dash", line_color="#e74c3c", annotation_text="多头超载边界 (>=0.01%)")
+        fig_crypto.update_layout(title_text="OKX BTC-USDT-SWAP 历史资金费率", template="plotly_white", height=400)
+        st.plotly_chart(fig_crypto, use_container_width=True)
+
+# --- TAB 4 ---
+with tab4:
+    if not quant_data["error"] and "df_hist" in quant_data:
+        h_df = quant_data["df_hist"]
+        fig_cta = go.Figure()
+        fig_cta.add_trace(go.Scatter(x=h_df.index, y=h_df['cta_shorts'], name="系统性空头得分", line=dict(color="#e74c3c", width=2.5)))
+        fig_cta.add_trace(go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头得分", line=dict(color="#2ecc71", width=2.5)))
+        fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极值激活线 (2)")
+        fig_cta.update_layout(title_text="CTA 量化追踪：多/空头趋势耗尽历史得分", template="plotly_white", height=400)
+        st.plotly_chart(fig_cta, use_container_width=True)
+
+# --- TAB 5 ---
+with tab5:
+    if not quant_data["error"] and "df_hist" in quant_data:
+        h_df = quant_data["df_hist"]
+        c6_col1, c6_col2 = st.columns(2)
+        
+        with c6_col1:
+            fig_corr = go.Figure()
+            fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr'], name="真实值", line=dict(color="#bdc3c7", width=1)))
+            fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_fast'], name="EMA5 (快线)", line=dict(color="#e74c3c", width=2)))
+            fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_slow'], name="EMA21 (慢线)", line=dict(color="#2c3e50", width=2)))
+            fig_corr.update_layout(title_text="CBOE COR1M 相关性快慢线 (死叉形成释放见底信号)", template="plotly_white", height=380)
+            st.plotly_chart(fig_corr, use_container_width=True)
+            
+        with c6_col2:
+            fig_disp = go.Figure()
+            fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dspx'], name="真实值", line=dict(color="#bdc3c7", width=1)))
+            fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_fast'], name="EMA5 (快线)", line=dict(color="#2ecc71", width=2)))
+            fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_slow'], name="EMA21 (慢线)", line=dict(color="#34495e", width=2)))
+            fig_disp.update_layout(title_text="CBOE DSPX 离散度快慢线 (高位金叉发散警惕拉巨头出货)", template="plotly_white", height=380)
+            st.plotly_chart(fig_disp, use_container_width=True)
+
+# --- TAB 6 ---
+with tab6:
+    if not vxn_vix_data["error"] and "df_hist" in vxn_vix_data:
+        vx_df = vxn_vix_data["df_hist"]
+        c7_col1, c7_col2 = st.columns(2)
+        
+        with c7_col1:
+            fig_vx_spread = go.Figure()
+            fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread'], name="真实剪刀差 (VXN - VIX)", line=dict(color='#bdc3c7', width=1)))
+            fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Fast'], name="EMA5 (微观快线)", line=dict(color='#e74c3c', width=2)))
+            fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Slow'], name="EMA21 (趋势慢线)", line=dict(color='#2c3e50', width=2)))
+            fig_vx_spread.update_layout(
+                title_text="VXN - VIX 波动率剪刀差收敛雷达 (高位死叉确立科技股黄金买点)", 
+                template="plotly_white", 
+                height=380
+            )
+            st.plotly_chart(fig_vx_spread, use_container_width=True)
+            
+        with c7_col2:
+            fig_vx_ratio = go.Figure()
+            fig_vx_ratio.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Ratio'], name="VXN / VIX 比率", line=dict(color='#9b59b6', width=2, dash='dash')))
+            fig_vx_ratio.add_hline(y=1.35, line_dash="dash", line_color="#e74c3c", annotation_text="极端过热线 (1.35)")
+            fig_vx_ratio.add_hline(y=1.10, line_dash="dash", line_color="#2ecc71", annotation_text="极限自满线 (1.10)")
+            fig_vx_ratio.update_layout(
+                title_text="VXN / VIX 情绪乘数溢价区间 (追踪科技股相对大盘的拥挤度)", 
+                template="plotly_white", 
+                height=380
+            )
+            st.plotly_chart(fig_vx_ratio, use_container_width=True)
+    else:
+        st.warning("⚠️ VXN-VIX 科技前哨模块数据未激活或加载失败。")
