@@ -320,86 +320,80 @@ def calculate_quant_and_breadth_signals():
         elif cta_top_active: cta_status_text = "系统性多头买盘枯竭"
         elif cta_shorts_exhausted > 0 or cta_longs_exhausted > 0: cta_status_text = "CTA 动量分化调仓期"
 
-        # =====================================================================
-        # 1. 相关性与离散度微观状态计算
-        # =====================================================================
-        if corr_is_broken:
-            corr_diag = "历史数据流断裂，无法动态诊断。"
-            corr_dead_cross = False
-        else:
-            # 基础动能计算：相关性曾处于高位区，且当前快线死叉慢线
-            corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1] or (c_spot > corr_q75.iloc[-1])
-            corr_dead_cross = corr_recent_high and (c_f < c_s)
-            
-        # 大盘高位及自满情绪判定
-        market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
-        try: 
-            market_complacent = c_s < corr_q25.iloc[-1] or (c_spot < corr_q25.iloc[-1])
-        except: 
-            market_complacent = False
+        # CBOE 交叉盘及动态分情况推演
+        corr_is_broken = corr_series.tail(10).max() == corr_series.tail(10).min()
+        corr_fast = corr_series.ewm(span=5, adjust=False).mean()
+        corr_slow = corr_series.ewm(span=21, adjust=False).mean()
+        corr_q75 = corr_series.rolling(126).quantile(0.75) 
+        corr_q25 = corr_series.rolling(126).quantile(0.25)
+         
+        dsp_fast = dspx_series.ewm(span=5, adjust=False).mean()
+        dsp_slow = dspx_series.ewm(span=21, adjust=False).mean()
         
-        # 离散度基础突破信号
-        disp_breaking_up = d_f > d_s
-        # 离散度均线：用于确认个股个异性是否脱离底部冰点
-        dspx_mean = dspx_series.rolling(126).mean().iloc[-1] if len(dspx_series) >= 126 else dspx_series.mean()
-        dspx_not_dying = (d_f > d_s) or (d_spot > dspx_mean)
+        c_spot, c_f, c_s = corr_series.iloc[-1], corr_fast.iloc[-1], corr_slow.iloc[-1]
+        d_spot, d_f, d_s = dspx_series.iloc[-1], dsp_fast.iloc[-1], dsp_slow.iloc[-1]
+        
+        # 【补齐】引入滚动 60 日 Z-Score 计算历史极值分位，实现尾部防御
+        corr_mean = corr_series.rolling(60).mean().iloc[-1]
+        corr_std = corr_series.rolling(60).std().iloc[-1]
+        dspx_mean = dspx_series.rolling(60).mean().iloc[-1]
+        dspx_std = dspx_series.rolling(60).std().iloc[-1]
+        
+        c_z = (c_spot - corr_mean) / corr_std if corr_std > 0 else 0
+        d_z = (d_spot - dspx_mean) / dspx_std if dspx_std > 0 else 0
 
-        # =====================================================================
-        # 核心升级：相关性 ✖ 离散度【双向互证锁死】状态机
-        # =====================================================================
-        # 【双剑合璧抄底】：系统性恐慌共振见顶退潮（死叉），同时Alpha个股开始复苏（拒绝无差别等死状态）
-        corr_bottom_active = corr_dead_cross and dspx_not_dying
-
-        # 【双剑合璧逃顶】：大盘高位 ✖ 极端自满麻木（相关性冰点） ✖ 资金抱团撕裂广度恶化（离散度金叉突破）
-        breadth_top_active = market_high and market_complacent and disp_breaking_up
-
-        # =====================================================================
-        # 2. 分项动态诊断文案输出
-        # =====================================================================
+        # 1. 相关性微观动能（包含极致抄底）
         if corr_is_broken:
             corr_diag = "历史数据流断裂，无法动态诊断。"
-        elif c_spot > c_f > c_s:
-            corr_diag = "【相关性强劲多头加速】全市场恐慌共振急速加剧，无差别踩踏进行时，左侧高危。"
-        elif corr_bottom_active:
-            corr_diag = "【相关性死叉反转 ✖ 离散度复苏】高位恐慌退潮，且微观资金挑选个股进场，抄底黄金信号激活。"
-        elif c_f < c_s:
-            corr_diag = "【相关性处于空头退潮】市场同频恐慌持续消退，资金逐步脱离宏观恐慌压制。"
+            corr_bottom_active = False
         else:
-            corr_diag = "【相关性低位蓄势震荡】全市场处于非共振状态，个股走势呈现常态化独立性。"
+            # 补齐：不仅考虑滚动高位交叉，若满足流动性践踏危机（Z-Score 暴涨后死叉）同样强激活
+            corr_recent_high = corr_slow.tail(10).max() > corr_q75.iloc[-1] or (c_z > 1.8)
+            corr_bottom_active = corr_recent_high and (c_f < c_s)
+            
+            if c_spot > c_f > c_s:
+                corr_diag = f"【相关性强劲多头加速(Z:{c_z:.1f})】全市场恐慌共振急速加剧，无差别踩踏进行时，左侧高危，禁场观望。"
+            elif corr_bottom_active:
+                corr_diag = f"【相关性确立死叉反转(Z:{c_z:.1f})】高位恐慌共振正式见顶回落！无差别抛售结束，抄底黄金信号激活。"
+            elif c_f < c_s:
+                corr_diag = "【相关性处于空头退潮】市场同频恐慌持续消退，资金逐步恢复理性。"
+            else:
+                corr_diag = "【相关性低位蓄势震荡】全市场处于非共振状态，个股走势呈现常态化独立性。"
 
+        # 2. 离散度微观动能（包含极致逃顶条件升级补齐）
+        market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
+        try: market_complacent = c_s < corr_q25.iloc[-1] or (c_z < -1.2)
+        except: market_complacent = False
+        
+        disp_breaking_up = d_f > d_s
+        
+        # 补齐双轨逃顶触发逻辑：
+        # 轨道①：常规高位自满+分化突破
+        # 轨道②：极端撕裂突变（离散度 Z-Score 强突围且大盘处于 50 日均线上方的多头伪装层）
+        breadth_top_active = (market_high and market_complacent and disp_breaking_up) or (market_high and d_z > 1.8 and disp_breaking_up)
+        
         if d_spot > d_f > d_s:
-            disp_diag = "【离散度强劲多头加速】市场撕裂极度恶化！巨头掩护出货迹象显著，大盘广度死穴正在拉响警报。"
+            disp_diag = f"【离散度强劲多头加速(Z:{d_z:.1f})】市场撕裂极度恶化！巨头掩护出货迹象显著，大盘广度死穴正在拉响警报。"
         elif breadth_top_active:
-            disp_diag = "【离散度金叉突破 ✖ 相关性自满冰点】全市场无视系统风险，但结构撕裂确认破位，确立窒息顶防御信号。"
+            disp_diag = f"【离散度确定金叉突破(Z:{d_z:.1f})】大盘高位分化动能突围！确立权重抱团/个股失血的终极见顶风控信号。"
         elif d_f < d_s:
             disp_diag = "【离散度处于分化收敛】两极分化动能减弱，个股收益率分布趋同，结构性撕裂暂时缓解。"
         else:
             disp_diag = "【离散度常态化震荡】无极端抱团或分裂，板块轮动相对均衡。"
 
-        # =====================================================================
-        # 3. 联合动态看板象限（通过 Z-Score 衡量绝对极端位置）
-        # =====================================================================
-        corr_m = corr_series.rolling(126).mean().iloc[-1] if len(corr_series) >= 126 else corr_series.mean()
-        corr_std = corr_series.rolling(126).std().iloc[-1] if len(corr_series) >= 126 else corr_series.std()
-        dspx_std = dspx_series.rolling(126).std().iloc[-1] if len(dspx_series) >= 126 else dspx_series.std()
-        
-        c_z = (c_spot - corr_m) / corr_std if corr_std > 0 else 0
-        d_z = (d_spot - dspx_mean) / dspx_std if dspx_std > 0 else 0
-
-        if c_z > 1.5 and d_z < -1.5:
-            combined_diag = "🔥 【资金象限：流动性崩溃】泥沙俱下，无差别无理智践踏抛售（相关性极高/离散度极低，此时禁入，等待两指标双向调头）"
-        elif c_z < -1.2 and d_z > 1.5:
-            combined_diag = "🌋 【资金象限：结构性极值见顶】大盘高位死寂，离散度暴飙，资金疯狂抱团少数权重股，其余个股严重阴跌抽血"
-        elif corr_bottom_active:
-            combined_diag = "🟢 【资金象限：黄金共振抄底点】全市场恐慌共振见顶回落，个股开始各显神通，随机森林模型胜率最高期！"
-        elif breadth_top_active:
-            combined_diag = "🔴 【资金象限：广度死穴风控点】大盘高位自满，但个股撕裂动能金叉突破，触发终极逃顶防御！"
+        # 3. 联合象限矩阵重构与完美补齐（含流动性崩塌尾部拦截）
+        if c_z > 2.0 and d_z < -1.8:
+            combined_diag = "🔥 【资金象限：流动性崩溃】泥沙俱下，无差别无理智践踏抛售（等待死叉反转黄金抄底）"
+        elif c_z < -1.5 and d_z > 1.8:
+            combined_diag = "🌋 【资金象限：极致情绪亢奋】抱团极其严重，垃圾时间末期，随时诱发多杀多踩踏"
         elif (c_f > c_s) and (d_f <= d_s): 
-            combined_diag = "📊 【资金象限：常态泥沙俱下】恐慌在扩散，个股向同跌收敛"
+            combined_diag = "📊 【资金象限：泥沙俱下】流动性常态宣泄"
         elif (c_f <= c_s) and (d_f > d_s):
-            combined_diag = "🚨 【资金象限：结构轮动分化】常态化选股环境，个股特异性明显"
+            combined_diag = "🚨 【资金象限：结构撕裂】权重抱团失血（强烈防范个股筑顶）"
+        elif (c_f <= c_s) and (d_f <= d_s):
+            combined_diag = "⏳ 【资金象限：低波自满】常态健康运行"
         else:
-            combined_diag = "⏳ 【资金象限：低波自满运行】常态横盘，情绪均衡运行，等待两端极值突变"
+            combined_diag = "⚡ 【资金象限：宏观剧震】风格暴烈洗牌"
 
         cboe_corr_text = f"当前:{c_spot:.2f}(Z:{c_z:.1f}) | EMA5:{c_f:.2f}"
         cboe_disp_text = f"当前:{d_spot:.2f}(Z:{d_z:.1f}) | EMA5:{d_f:.2f}"
@@ -438,6 +432,7 @@ def calculate_quant_and_breadth_signals():
             "corr_bottom_active": False, "breadth_top_active": False,
             "corr_diag": "诊断异常", "disp_diag": "诊断异常", "combined_diag": "诊断异常"
         }
+        
 @st.cache_data(ttl=3600)
 def fetch_vxn_vix_data():
     """
@@ -644,15 +639,15 @@ switches = [
     },
     {
         "id": 5,
-        "name": "全局隐含相关性拐点与离散度爆发",
+        "name": "全局隐含相关性拐点与离散度爆发 (重构版)",
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
-        "value": f"相关性: {quant_data.get('cboe_corr', 'N/A')} | 离散度: {quant_data.get('cboe_disp', 'N/A')}",
-        "source": "CBOE COR1M / DSPX 指数 (EMA5 与 EMA21)",
-        "desc_bottom": "【黄金共振抄底标准：相关性死叉 ✖ 离散度复苏】不仅需要看宏观泥沙俱下的无差别砸盘停手（相关性 EMA5 死叉 EMA21 调头向下），还必须看到微观聪明资金开始左/右侧挑选基本面个股买入（离散度 DSPX 出现底部抬头或反弹）。标志着恐慌共振结束且个股特异性复苏，此时启动期望值与随机森林诊断模型做多，胜率极高。",
-        "desc_top": "【双向互证逃顶标准：离散度爆发 ✖ 相关性自满冰点】当大盘处于价格高位，且全市场对系统性风险极度懈怠（相关性慢线跌破25分位数或处于极端低谷）时，离散度却突然发生微观金叉向上突围（EMA5 > EMA21）。揭示了水面下绝大多数个股已被失血阴跌、资金只能抱团极少数权重的“终极窒息顶”结构，触发全盘防御减仓。",
+        "value": f"{quant_data.get('cboe_corr', 'N/A')} | 离散度: {quant_data.get('cboe_disp', 'N/A')}",
+        "source": "CBOE COR1M / DSPX 指数 (EMA 趋势一阶导数 ✖ 滚动 Z-Score 状态机)",
+        "desc_bottom": "【抄底激活：流动性无差别踩踏结束】当相关性在中高位（或 Z > 1.8 极高位）确立微观均线死叉（EMA5 < EMA21）时激活。标志着市场无理智砸盘出清完毕，个股特异性开始回归，此时结合随机森林选股模型胜率及期望值（EV）最高。",
+        "desc_top": "【逃顶激活：两极撕裂突破/个股严重失血】当大盘高位且市场相关性极度自满，或者离散度指数 DSPX 出现脉冲式金叉突破（Z-Score > 1.8）时激活。标志着资金正在疯狂抱团少数权重股，中小盘个股被动抽血，是大盘广度（Breadth）彻底崩溃的终极防御风控线。",
         "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
-            f"<b>当下状态：</b>{quant_data.get('combined_diag', '无信息')}<br>"
+            f"<b>当下资金面象限：</b>{quant_data.get('combined_diag', '无信息')}<br>"
             f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
             f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
         ),
