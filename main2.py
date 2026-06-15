@@ -418,87 +418,87 @@ def calculate_quant_and_breadth_signals():
 @st.cache_data(ttl=3600)
 def fetch_vxn_vix_data():
     """
-    第 6 套独立引擎 - VXN-VIX 科技股波动率剪刀差前哨系统
-    结构完全对齐开关 3 / 开关 5 规范
+    第 6 套独立引擎 - VXN-VIX 科技股波动率四象限前哨系统
+    结构对齐 Sentinel 2.0 规范，完整覆盖防守、试探、重仓与轮动状态
     """
     try:
-        # 抓取纳指波动率 ^VXN 与 标普波动率 ^VIX
         tickers = yf.Tickers('^VXN ^VIX')
         hist = tickers.history(period='3mo')
         
         if not hist.empty and 'Close' in hist.columns:
             df = hist['Close'].ffill().copy()
             
-            # 计算核心指标：剪刀差 (Spread) 与 比率 (Ratio)
+            # 计算核心指标
             df['Spread'] = df['^VXN'] - df['^VIX']
             df['Ratio'] = df['^VXN'] / df['^VIX']
             
-            # 计算微观动能快慢线 (EMA5 / EMA21)
+            # 计算微观动能 (EMA5 / EMA21)
             df['Spread_Fast'] = df['Spread'].ewm(span=5, adjust=False).mean()
             df['Spread_Slow'] = df['Spread'].ewm(span=21, adjust=False).mean()
             
-            # 当前最新值与昨日值
+            # 最新状态提取
             current_spread = df['Spread'].iloc[-1]
-            prev_spread = df['Spread'].iloc[-2] if len(df) >= 2 else current_spread
             current_ratio = df['Ratio'].iloc[-1]
-            
             fast_curr = df['Spread_Fast'].iloc[-1]
             slow_curr = df['Spread_Slow'].iloc[-1]
+            
             fast_prev = df['Spread_Fast'].iloc[-2] if len(df) >= 2 else fast_curr
             slow_prev = df['Spread_Slow'].iloc[-2] if len(df) >= 2 else slow_curr
+            vix_spot = df['^VIX'].iloc[-1]
             
             # --- 交叉动能判定 ---
-            # 死叉反转：昨日快>=慢，今日快<慢 (代表科技股极端恐慌无差别宣泄结束，波动率溢价回落)
             is_death_cross = (fast_prev >= slow_prev) and (fast_curr < slow_curr)
-            # 金叉突围：昨日快<=慢，今日快>慢 (代表科技股投机热度或局部恐慌开始剧烈发散)
             is_golden_cross = (fast_prev <= slow_prev) and (fast_curr > slow_curr)
-            
-            # 近期（5日内）剪刀差是否曾冲破过高位恐慌带 (例如 > 8.0)
             had_high_panic = df['Spread'].tail(5).max() > 8.0
             
-            # --- 动能触发状态 ---
-            bottom_active = is_death_cross and had_high_panic and (df['^VIX'].iloc[-1] < 35)
-            top_active = (current_spread < 2.0) or (is_golden_cross and current_spread > 7.5)
+            # -----------------------------------------------------------------
+            # 核心战术象限判定矩阵 (Space + Momentum)
+            # -----------------------------------------------------------------
+            # 象限一：黄金右侧 (高位死叉 + 曾经暴涨 + VIX未发生全盘熔断)
+            bottom_active = is_death_cross and had_high_panic and (vix_spot < 35.0)
             
-            # -----------------------------------------------------------------
-            # 【分项诊断 1】：📊 剪刀差微观动能独立诊断
-            # -----------------------------------------------------------------
-            if is_death_cross:
-                spread_diag = f"【剪刀差高位死叉】快线({fast_curr:.2f})下穿慢线({slow_curr:.2f})。科技股特有恐慌宣泄阶段性筑顶，资金正重回理性。"
-            elif is_golden_cross:
-                spread_diag = f"【剪刀差低位金叉】快线({fast_curr:.2f})上穿慢线({slow_curr:.2f})。科技股波动率动能正在非对称放大，警惕分化加剧。"
-            elif fast_curr < slow_curr:
-                spread_diag = f"【动能持续收敛】快线运行于慢线下方，科技股溢价风险维持常态化出清或处于安全多头修复通道。"
-            else:
-                spread_diag = f"【动能持续发散】快线运行于慢线上方，科技股情绪溢价处于高位横盘或风险积聚期。"
-                
-            # -----------------------------------------------------------------
-            # 【分项诊断 2】：📉 比率情绪象限独立诊断
-            # -----------------------------------------------------------------
-            if current_ratio > 1.35:
-                ratio_diag = f"【比率极端过热】当前比率({current_ratio:.2f})突破1.35警戒线，纳指期权多头对冲严重踩踏或投机盘极度拥挤。"
-            elif current_ratio < 1.10:
-                ratio_diag = f"【比率过度自满】当前比率({current_ratio:.2f})跌破1.10，科技股波动率溢价被极限压缩，市场严重缺乏避险防备。"
-            else:
-                ratio_diag = f"【比率常态均衡】当前比率({current_ratio:.2f})在1.10-1.35理性区间，科技股相对于大盘的风险溢价比例健康。"
+            # 象限二：火山口 (单边科技股踩踏，极度昂贵且动能向上)
+            volcano_active = (current_spread > 7.5 or current_ratio > 1.35) and (fast_curr > slow_curr)
+            
+            # 象限三：暴风雨前夜 (极度自满被打破，低位金叉起跳)
+            storm_prep_active = (current_spread < 3.0 or current_ratio < 1.10) and is_golden_cross
+            
+            # 顶部风控触发条件：处于火山口 或 暴风雨前夜，均需要启动系统性防御
+            top_active = volcano_active or storm_prep_active
 
             # -----------------------------------------------------------------
-            # 【综合状态判定】：合并双指标交叉诊断结果
+            # 【分项诊断】：基础文案保留，提供微观细节
+            # -----------------------------------------------------------------
+            if is_death_cross:
+                spread_diag = f"【高位死叉】快线({fast_curr:.2f})下穿慢线({slow_curr:.2f})。波动率溢价回落，恐慌出清。"
+            elif is_golden_cross:
+                spread_diag = f"【低位金叉】快线({fast_curr:.2f})上穿慢线({slow_curr:.2f})。波动率动能放大，警惕分化。"
+            elif fast_curr < slow_curr:
+                spread_diag = f"【动能收敛】快线运行于慢线下方，科技股溢价风险维持常态化修复。"
+            else:
+                spread_diag = f"【动能发散】快线运行于慢线上方，科技股情绪溢价处于风险积聚期。"
+                
+            if current_ratio > 1.35:
+                ratio_diag = f"【极端过热】比率({current_ratio:.2f})突破1.35。纳指多头对冲严重踩踏，极度拥挤。"
+            elif current_ratio < 1.10:
+                ratio_diag = f"【过度自满】比率({current_ratio:.2f})跌破1.10。市场极度懈怠，隐性筑顶风险剧增。"
+            else:
+                ratio_diag = f"【常态均衡】比率({current_ratio:.2f})在健康区间，风格资产未出现单边撕裂。"
+
+            # -----------------------------------------------------------------
+            # 【全局指挥官】：融合四象限的终端指令
             # -----------------------------------------------------------------
             if bottom_active:
-                combined_diag = "🚀 科技股黄金右侧：剪刀差见顶死叉 ✖ 极端恐慌出清完成"
-            elif top_active:
-                if current_spread < 2.0:
-                    combined_diag = "🚨 科技股极度逃顶：剪刀差极限压缩（暴风雨前的死寂）"
-                else:
-                    combined_diag = "🚨 科技股风控激活：剪刀差高位金叉爆发（波动率溢价异动）"
+                combined_diag = "🚀 【黄金右侧】科技股恐慌见顶！现货全面进场，严禁做空！"
+            elif volcano_active:
+                combined_diag = "🌋 【火山口】独立踩踏发散中！触发多头硬熔断，严禁接飞刀！"
+            elif storm_prep_active:
+                combined_diag = "🌀 【前哨预警】极度自满打破，低位动能金叉！开始战略减仓科技多头！"
             else:
                 if current_ratio < 1.10:
-                    combined_diag = "🟡 风险提示：科技股期权对冲完全懈怠，隐含隐性筑顶风险"
-                elif fast_curr > slow_curr and current_spread > 7.0:
-                    combined_diag = "🔴 强力防御：科技股正遭遇独立流动性无差别抛售浪潮"
+                    combined_diag = "🟡 【隐性风险】极度自满，期权对冲完全懈怠，隐含被动洗盘风险。"
                 else:
-                    combined_diag = "🟢 状态中性：科技股与大盘情绪同步，维持常态化牛市结构"
+                    combined_diag = "🟢 【常态牛市】情绪均衡。多头 EV 模型正常运转，拥抱趋势。"
             
             return {
                 "current_spread": round(current_spread, 2),
@@ -638,17 +638,17 @@ switches = [
     },
     {
         "id": 6,
-        "name": "VXN-VIX 科技股波动率剪刀差前哨",
+        "name": "VXN-VIX 科技股四象限雷达",
         "bottom_active": vxn_vix_data["bottom_active"] if not vxn_vix_data["error"] else False,
         "top_active": vxn_vix_data["top_active"] if not vxn_vix_data["error"] else False,
-        "value": f"当前剪刀差: {vxn_vix_data.get('current_spread', 'N/A')} (快线: {vxn_vix_data.get('fast_curr', 'N/A')} / 慢线: {vxn_vix_data.get('slow_curr', 'N/A')}) | 当前比率: {vxn_vix_data.get('current_ratio', 'N/A')}",
-        "source": "CBOE VXN 指数 & VIX 指数 实时对冲矩阵",
-        "desc_bottom": "【科技股右侧抄底标准：高位死叉】当剪刀差（VXN-VIX）曾在5日内冲破 8.0 恐慌带，且当前快线（EMA5）死叉跌破慢线（EMA21）时激活。代表科技股最极端的非理性恐慌抛压衰竭，主力资金率先左侧建仓回流。",
-        "desc_top": "【科技股绝对风控标准：极限压缩或高位金叉】当剪刀差极度压缩至 < 2.0（意味着高贝塔的科技股波动率竟与大盘持平，市场毫无对冲防备），或在高位突然金叉暴开时激活。提示科技股估值极其拥挤或正遭遇精准定向爆破。",
+        "value": f"Spread: {vxn_vix_data.get('current_spread', 'N/A')} | Ratio: {vxn_vix_data.get('current_ratio', 'N/A')} | 熔断风控实时检测",
+        "source": "CBOE 波动率剪刀差 & EMA 一阶导数交叉",
+        "desc_bottom": "【右侧出击】当剪刀差自高位（>8.0）回落，且微观动能死叉（EMA5 < EMA21）时激活。此时非对称踩踏结束，IV Crush 来临，是高弹性科技股胜率极高的反转买点。",
+        "desc_top": "【双重风控防御】① 火山口（单边踩踏）：极高位金叉发散，无条件熔断科技股多头；② 暴风雨前夜（隐性筑顶）：低位自满区间突发金叉，主力悄然买入 Put，需立刻收紧止盈或做空保护。",
         "fetched_status": "数据抓取失败 🔴" if vxn_vix_data["error"] else (
-            f"<b>当下状态：</b>{vxn_vix_data.get('combined_diag', '无信息')}<br>"
-            f"<b>📊 剪刀差微观动能：</b>{vxn_vix_data.get('spread_diag', '无信息')}<br>"
-            f"<b>📉 比率情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
+            f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#d35400;'>{vxn_vix_data.get('combined_diag', '无信息')}</div>"
+            f"<b>📊 微观动能：</b>{vxn_vix_data.get('spread_diag', '无信息')}<br>"
+            f"<b>📉 情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
         ),
         "update_cycle": "每 1 小时",
         "last_updated": now_str
