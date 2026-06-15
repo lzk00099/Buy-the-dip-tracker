@@ -37,14 +37,6 @@ st.markdown("""
     .badge-bottom { background-color: #2ecc71; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
     .badge-top { background-color: #e74c3c; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
     .badge-info { background-color: #3498db; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
-    
-    /* 折叠面板统一样式 */
-    details > summary {
-        list-style: none;
-    }
-    details > summary::-webkit-details-marker {
-        display: none;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -85,14 +77,15 @@ def fetch_vix_data():
             bottom_active = (prev_ratio <= 1.0) and (ratio > 1.0)
             top_active = ((prev_ratio >= 1.0) and (ratio < 1.0)) or (ratio > 1.24)
   
+            # 转义符号：修复 HTML 前端吞噬 < 和 > 标签的致命 Bug
             if bottom_active:
-                vix_ratio_diag = f"【比率跨线修复】比率自昨日({prev_ratio:.3f})<=1向上突破为今日({ratio:.3f})>1。结构由倒挂发生多头逆转修复。"
+                vix_ratio_diag = f"【比率跨线修复】比率自昨日({prev_ratio:.3f})&lt;=1向上突破为今日({ratio:.3f})&gt;1。结构由倒挂发生多头逆转修复。"
             elif (prev_ratio >= 1.0) and (ratio < 1.0):
-                vix_ratio_diag = f"【比率自满破位】比率自昨日({prev_ratio:.3f})>=1跌破至今日({ratio:.3f})<1，牛市高位期限结构基础松动。"
+                vix_ratio_diag = f"【比率自满破位】比率自昨日({prev_ratio:.3f})&gt;=1跌破至今日({ratio:.3f})&lt;1，牛市高位期限结构基础松动。"
             elif ratio > 1.24:
                 vix_ratio_diag = f"【比率极限超载】当前比率({ratio:.3f})冲破1.24绝对高线，期权做空波动率策略极度拥挤，高度自满。"
             elif ratio <= 1.0:
-                vix_ratio_diag = f"【比率持续倒挂】当前比率({ratio:.3f})<=1持续低于平衡线，系统流动性仍处于撕裂出清的冰点观察期。"
+                vix_ratio_diag = f"【比率持续倒挂】当前比率({ratio:.3f})&lt;=1持续低于平衡线，系统流动性仍处于撕裂出清的冰点观察期。"
             elif 1.20 <= ratio <= 1.24:
                 vix_ratio_diag = f"【比率高位自满】当前比率({ratio:.3f})处于1.20-1.24敏感高位带，市场多头自满情绪常规化积压。"
             else:
@@ -101,7 +94,7 @@ def fetch_vix_data():
             if vix >= 24.0:
                 vix_spot_diag = f"【现货恐慌爆发】当前VIX现货飙升至 {vix:.2f}，突破24.0恐慌红线，市场恐慌共振剧烈，宣泄抛压进行时。"
             elif vix < 13.5:
-                vix_spot_diag = f"【现货极低自满】当前VIX现货极低为 {vix:.2f} (<13.5)，期权空头完全无防备过度乐观，需严防黑天鹅异变。"
+                vix_spot_diag = f"【现货极低自满】当前VIX现货极低为 {vix:.2f} (&lt;13.5)，期权空头完全无防备过度乐观，需严防黑天鹅异变。"
             else:
                 vix_spot_diag = f"【现货常态理性】当前VIX现货为 {vix:.2f}，处于13.5-24.0的合理宽幅震荡区间，大盘暂无突发性异动风险。"
 
@@ -268,7 +261,6 @@ def fetch_cboe_official_history(symbol):
 
 @st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
-    """大盘 ETF 与 CBOE 官方数据混合对齐引擎 —— 完美补齐版（开关 5 终极状态机，覆盖全场景联动）"""
     try:
         raw_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
         yf_tickers = filter_leveraged_etfs(raw_tickers)
@@ -334,7 +326,6 @@ def calculate_quant_and_breadth_signals():
         c_spot, c_f, c_s = corr_series.iloc[-1], corr_fast.iloc[-1], corr_slow.iloc[-1]
         d_spot, d_f, d_s = dspx_series.iloc[-1], dsp_fast.iloc[-1], dsp_slow.iloc[-1]
         
-        # 滚动 60 日 Z-Score 计算历史极值分位
         corr_mean = corr_series.rolling(60).mean().iloc[-1]
         corr_std = corr_series.rolling(60).std().iloc[-1]
         dspx_mean = dspx_series.rolling(60).mean().iloc[-1]
@@ -343,9 +334,6 @@ def calculate_quant_and_breadth_signals():
         c_z = (c_spot - corr_mean) / corr_std if corr_std > 0 else 0
         d_z = (d_spot - dspx_mean) / dspx_std if dspx_std > 0 else 0
 
-        # === 重构：相关性(C)与离散度(D) 深度绑定逻辑矩阵 ===
-        
-        # 状态提取
         c_is_high = c_z > 1.0 or c_s > corr_q75.iloc[-1]
         c_is_low = c_z < -1.0 or c_s < corr_q25.iloc[-1]
         c_dead_cross = c_f < c_s
@@ -360,20 +348,15 @@ def calculate_quant_and_breadth_signals():
             corr_diag, disp_diag, combined_diag = "流断裂", "流断裂", "数据断层"
             corr_bottom_active = breadth_top_active = False
         else:
-            # 1. 独立动能文案
             if c_golden_cross: corr_diag = f"【相关性升温(Z:{c_z:.1f})】全市场同涨同跌共振加剧"
             else: corr_diag = f"【相关性退潮(Z:{c_z:.1f})】市场共振消退，逐步回归理性"
             
             if d_is_high: disp_diag = f"【离散度分化发散(Z:{d_z:.1f})】两极分化加剧，抱团失血效应显著"
             else: disp_diag = f"【离散度收敛(Z:{d_z:.1f})】板块轮动均衡，非极端撕裂期"
 
-            # 2. 抄底信号 (Bottom)：相关性极值后死叉回落（恐慌踩踏结束），且离散度没有极度撕裂（即 D 未发散或处于收敛）
             corr_bottom_active = c_is_high and c_dead_cross and not d_is_high
-            
-            # 3. 逃顶信号 (Top)：相关性极低位（指数伪装太平），但离散度爆发性增高（大票硬撑掩护中小票出货）
             breadth_top_active = market_high and c_is_low and d_is_high
             
-            # 4. 联合象限矩阵全景覆盖
             if c_golden_cross and d_is_high:
                 combined_diag = "⚡ 【象限 I: 双高危机】宏观剧震引发系统流动性冲击与内部结构剧烈撕裂并发（观望，严防无差别闪崩）"
             elif c_golden_cross and not d_is_high:
@@ -695,6 +678,10 @@ for i, s in enumerate(switches):
             badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
         
         metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
+        
+        # 【防御拦截逻辑】：将文本中的 < 和 > 转义为安全的 HTML 实体 &lt; 和 &gt;，避免吞噬后续组件
+        safe_desc_bottom = s['desc_bottom'].replace('<', '&lt;').replace('>', '&gt;')
+        safe_desc_top = s['desc_top'].replace('<', '&lt;').replace('>', '&gt;')
             
         st.markdown(f"""
         <div class="metric-box {box_class}">
@@ -704,13 +691,15 @@ for i, s in enumerate(switches):
             </div>
             <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eee;">
             <p style="margin: 2px 0; font-size:10pt;"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
-            <p style="margin: 2px 0; font-size:9.5pt;"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></p>
+            <p style="margin: 2px 0 6px 0; font-size:9.5pt;"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></p>
             
-            <details style="margin: 8px 0; font-size: 9.5pt; background-color: #f8f9fa; border-radius: 5px; padding: 6px; border: 1px solid #e0e0e0;">
-                <summary style="cursor: pointer; color: #34495e; font-weight: bold;">🔘 点击展开：多空防守边界逻辑</summary>
-                <div style="margin-top: 8px; padding-left: 6px; border-left: 3px solid #bdc3c7;">
-                    <p style="margin: 4px 0; font-size:9.5pt; line-height:1.4;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{s['desc_bottom']}</span></p>
-                    <p style="margin: 4px 0; font-size:9.5pt; line-height:1.4;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{s['desc_top']}</span></p>
+            <details style="margin: 10px 0; background-color: #f8f9fa; border-radius: 6px; border: 1px solid #e0e0e0; overflow: hidden;">
+                <summary style="cursor: pointer; padding: 8px 10px; font-size: 9.5pt; font-weight: bold; color: #2c3e50; outline: none; background-color: #f4f6f7; user-select: none;">
+                    🔘 点击展开：多空防守边界逻辑
+                </summary>
+                <div style="padding: 10px; border-top: 1px solid #e0e0e0; background-color: #ffffff;">
+                    <p style="margin: 0 0 6px 0; font-size: 9.5pt; line-height: 1.5;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
+                    <p style="margin: 0; font-size: 9.5pt; line-height: 1.5;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
                 </div>
             </details>
             
