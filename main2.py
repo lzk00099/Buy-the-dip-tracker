@@ -23,20 +23,34 @@ st.markdown("""
 <style>
     .reportview-container { background: #fdfbf7; }
     .metric-box {
-        padding: 15px;
+        padding: 10px 12px;
         border-radius: 8px;
         background-color: #ffffff;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        margin-bottom: 15px;
+        margin-bottom: 6px;
         border-left: 5px solid #cccccc;
+        font-size: 9pt;
+        line-height: 1.35;
     }
     .status-bottom-active { border-left-color: #2ecc71; background-color: #f4fbf7; }
     .status-top-active { border-left-color: #e74c3c; background-color: #fdf5f5; }
     .status-neutral { border-left-color: #3498db; background-color: #f0f7fc; }
+    .switch-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .switch-title { font-size: 9.4pt; font-weight: 700; color: #2c3e50; line-height: 1.25; }
+    .switch-value { margin: 4px 0 4px 0; font-size: 8.7pt; line-height: 1.35; }
+    .switch-status { margin: 2px 0 0 0; font-size: 8.6pt; line-height: 1.35; color: #34495e; }
+    .switch-status div, .switch-status p, .switch-status span { font-size: 8.6pt !important; line-height: 1.35 !important; }
+    .switch-footer { margin: 4px 0 10px 0; color: #7f8c8d; font-size: 8pt; line-height: 1.3; }
+    .switch-boundary-panel { padding: 8px 10px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #ffffff; }
+    .switch-boundary-panel p { margin: 0 0 6px 0; font-size: 8.6pt; line-height: 1.38; }
+    .switch-boundary-panel p:last-child { margin-bottom: 0; }
+    div[data-testid="stExpander"] { margin: 0 0 6px 0; }
+    div[data-testid="stExpander"] details { border-radius: 6px; }
+    div[data-testid="stExpander"] summary p { font-size: 8.8pt !important; line-height: 1.25 !important; }
     
-    .badge-bottom { background-color: #2ecc71; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
-    .badge-top { background-color: #e74c3c; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
-    .badge-info { background-color: #3498db; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
+    .badge-bottom { background-color: #2ecc71; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9px; white-space: nowrap; }
+    .badge-top { background-color: #e74c3c; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9px; white-space: nowrap; }
+    .badge-info { background-color: #3498db; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9px; white-space: nowrap; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -677,7 +691,7 @@ for i, s in enumerate(switches):
             box_class = "status-neutral"
             badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
         
-        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
+        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
         
         # 【防御拦截逻辑】：将文本中的 < 和 > 转义为安全的 HTML 实体 &lt; 和 &gt;，避免吞噬后续组件
         safe_desc_bottom = s['desc_bottom'].replace('<', '&lt;').replace('>', '&gt;')
@@ -685,26 +699,26 @@ for i, s in enumerate(switches):
             
         st.markdown(f"""
         <div class="metric-box {box_class}">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-size: 11pt; font-weight: bold; color: #2c3e50;">开关 {s['id']}: {s['name']}</span>
+            <div class="switch-head">
+                <span class="switch-title">开关 {s['id']}: {s['name']}</span>
                 {badge_html}
             </div>
             <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eee;">
-            <p style="margin: 2px 0; font-size:10pt;"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
-            <p style="margin: 2px 0 6px 0; font-size:9.5pt;"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></p>
+            <p class="switch-value"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
+            <div class="switch-status"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
         with st.expander("🔘 点击展开：多空防守边界逻辑", expanded=False):
             st.markdown(f"""
-            <div style="padding: 10px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #ffffff;">
-                <p style="margin: 0 0 8px 0; font-size: 9.5pt; line-height: 1.5;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
-                <p style="margin: 0; font-size: 9.5pt; line-height: 1.5;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
+            <div class="switch-boundary-panel">
+                <p><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
+                <p><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
             </div>
             """, unsafe_allow_html=True)
 
         st.markdown(f"""
-        <div style="margin: 5px 0 15px 0; color: #7f8c8d; font-size: 8.5pt;">
+        <div class="switch-footer">
             🧭 数据来源: {s['source']}
             {metadata_line}
         </div>
@@ -896,4 +910,3 @@ with tab6:
             st.plotly_chart(fig_vx_ratio, use_container_width=True)
     else:
         st.warning("⚠️ VXN-VIX 科技前哨模块数据未激活或加载失败。")
-
