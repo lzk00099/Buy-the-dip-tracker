@@ -23,20 +23,34 @@ st.markdown("""
 <style>
     .reportview-container { background: #fdfbf7; }
     .metric-box {
-        padding: 15px;
+        padding: 10px 12px;
         border-radius: 8px;
         background-color: #ffffff;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-        margin-bottom: 15px;
+        margin-bottom: 6px;
         border-left: 5px solid #cccccc;
+        font-size: 9pt;
+        line-height: 1.35;
     }
     .status-bottom-active { border-left-color: #2ecc71; background-color: #f4fbf7; }
     .status-top-active { border-left-color: #e74c3c; background-color: #fdf5f5; }
     .status-neutral { border-left-color: #3498db; background-color: #f0f7fc; }
+    .switch-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .switch-title { font-size: 9.4pt; font-weight: 700; color: #2c3e50; line-height: 1.25; }
+    .switch-value { margin: 4px 0 4px 0; font-size: 8.7pt; line-height: 1.35; }
+    .switch-status { margin: 2px 0 0 0; font-size: 8.6pt; line-height: 1.35; color: #34495e; }
+    .switch-status div, .switch-status p, .switch-status span { font-size: 8.6pt !important; line-height: 1.35 !important; }
+    .switch-footer { margin: 4px 0 10px 0; color: #7f8c8d; font-size: 8pt; line-height: 1.3; }
+    .switch-boundary-panel { padding: 8px 10px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #ffffff; }
+    .switch-boundary-panel p { margin: 0 0 6px 0; font-size: 8.6pt; line-height: 1.38; }
+    .switch-boundary-panel p:last-child { margin-bottom: 0; }
+    div[data-testid="stExpander"] { margin: 0 0 6px 0; }
+    div[data-testid="stExpander"] details { border-radius: 6px; }
+    div[data-testid="stExpander"] summary p { font-size: 8.8pt !important; line-height: 1.25 !important; }
     
-    .badge-bottom { background-color: #2ecc71; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
-    .badge-top { background-color: #e74c3c; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
-    .badge-info { background-color: #3498db; color: white; padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 11px; }
+    .badge-bottom { background-color: #2ecc71; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9px; white-space: nowrap; }
+    .badge-top { background-color: #e74c3c; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9px; white-space: nowrap; }
+    .badge-info { background-color: #3498db; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 9px; white-space: nowrap; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,6 +74,10 @@ def fetch_vix_data():
         if not hist.empty and 'Close' in hist.columns:
             close_data = hist['Close'].ffill().copy()
             close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
+            
+            # 【新增】引入微观快线(EMA5)与趋势慢线(EMA21)作为期限结构比率的动能依据
+            close_data['Ratio_Fast'] = close_data['Ratio'].ewm(span=5, adjust=False).mean()
+            close_data['Ratio_Slow'] = close_data['Ratio'].ewm(span=21, adjust=False).mean()
         
             vix = close_data['^VIX'].iloc[-1]
             vix3m = close_data['^VIX3M'].iloc[-1]
@@ -73,56 +91,85 @@ def fetch_vix_data():
             valid_ratios = close_data['Ratio'].dropna()
             if len(valid_ratios) >= 2:
                 prev_ratio = valid_ratios.iloc[-2]
+                
+            # 【新增】提取当前与前一日的 EMA 状态
+            fast_curr = close_data['Ratio_Fast'].iloc[-1]
+            slow_curr = close_data['Ratio_Slow'].iloc[-1]
+            fast_prev = close_data['Ratio_Fast'].iloc[-2] if len(close_data) >= 2 else fast_curr
+            slow_prev = close_data['Ratio_Slow'].iloc[-2] if len(close_data) >= 2 else slow_curr
+            
+            is_death_cross = (fast_prev >= slow_prev) and (fast_curr < slow_curr)
+            is_golden_cross = (fast_prev <= slow_prev) and (fast_curr > slow_curr)
           
-            bottom_active = (prev_ratio <= 1.0) and (ratio > 1.0)
-            top_active = ((prev_ratio >= 1.0) and (ratio < 1.0)) or (ratio > 1.24)
-  
-            # 转义符号：修复 HTML 前端吞噬 < 和 > 标签的致命 Bug
-            if bottom_active:
-                vix_ratio_diag = f"【比率跨线修复】比率自昨日({prev_ratio:.3f})&lt;=1向上突破为今日({ratio:.3f})&gt;1。结构由倒挂发生多头逆转修复。"
+            # -----------------------------------------------------------------
+            # 【重构】修改后的抄底、逃顶开关触发方式
+            # -----------------------------------------------------------------
+            # 抄底触发：比率由倒挂向上突破 1.0 平衡线，或者在低位区(ratio <= 1.05)发生了 EMA 动能金叉修复
+            bottom_active = ((prev_ratio <= 1.0) and (ratio > 1.0)) or (is_golden_cross and ratio <= 1.05)
+            
+            # 逃顶触发：比率冲破 1.25 绝对高位线，或者高位跌破 1.0 平衡线，或者在高位自满警戒带(ratio >= 1.15)发生了均线死叉
+            top_active = (ratio >= 1.25) or ((prev_ratio >= 1.0) and (ratio < 1.0)) or (is_death_cross and ratio >= 1.15)
+            
+            # -----------------------------------------------------------------
+            # 【重构】补充开关2每种细分情况的深入动态决策文字描述
+            # -----------------------------------------------------------------
+            ema_info = f" [EMA5:{fast_curr:.3f}, EMA21:{slow_curr:.3f}]"
+            
+            if ratio >= 1.25:
+                if fast_curr < slow_curr or is_death_cross:
+                    vix_ratio_diag = f"【比率极限见顶死叉】当前比率({ratio:.3f})冲破1.25绝对高线且EMA线死叉{ema_info}。做空拥挤盘遭遇情绪拐点反噬，多杀多风险极高，执行最高级别战略撤退。"
+                else:
+                    vix_ratio_diag = f"【比率极限超载发散】当前比率({ratio:.3f})冲破1.25绝对高线{ema_info}。市场极度懈怠自满，高位做空波动率策略严重过载，需严防高位突发踩踏闪崩。"
+            elif bottom_active:
+                vix_ratio_diag = f"【比率均线跨线/金叉修复】当前比率({ratio:.3f}){ema_info}。期限结构摆脱深度倒挂或低位达成共振修复，意味着恐慌衰竭，右侧安全抄底黄金点激活。"
             elif (prev_ratio >= 1.0) and (ratio < 1.0):
-                vix_ratio_diag = f"【比率自满破位】比率自昨日({prev_ratio:.3f})&gt;=1跌破至今日({ratio:.3f})&lt;1，牛市高位期限结构基础松动。"
-            elif ratio > 1.24:
-                vix_ratio_diag = f"【比率极限超载】当前比率({ratio:.3f})冲破1.24绝对高线，期权做空波动率策略极度拥挤，高度自满。"
+                vix_ratio_diag = f"【比率跌破平衡临界】今日比率跌破平衡至({ratio:.3f}){ema_info}。期限结构常态Contango基石全面瓦解，向倒挂过渡，大盘防线松动风险激增。"
             elif ratio <= 1.0:
-                vix_ratio_diag = f"【比率持续倒挂】当前比率({ratio:.3f})&lt;=1持续低于平衡线，系统流动性仍处于撕裂出清的冰点观察期。"
-            elif 1.20 <= ratio <= 1.24:
-                vix_ratio_diag = f"【比率高位自满】当前比率({ratio:.3f})处于1.20-1.24敏感高位带，市场多头自满情绪常规化积压。"
+                if fast_curr > slow_curr or is_golden_cross:
+                    vix_ratio_diag = f"【比率倒挂带微观金叉】当前比率({ratio:.3f})&lt;=1持续倒挂，但EMA出现微观金叉回暖{ema_info}。提示非理性无差别抛售最恐慌期已过，左侧洗盘进入尾声。"
+                else:
+                    vix_ratio_diag = f"【比率持续深度倒挂】当前比率({ratio:.3f})&lt;=1且均线空头排列{ema_info}。全市场系统流动性仍处于冰点宣泄期，需保持严格现金观望，克制接飞刀冲动。"
+            elif 1.15 <= ratio < 1.25:
+                if fast_curr < slow_curr:
+                    vix_ratio_diag = f"【高位自满动能死叉】当前比率({ratio:.3f})处于高位警戒带且出现均线转弱死叉{ema_info}。多头买盘边际枯竭，情绪转弱，建议分批减仓或收紧止盈。"
+                else:
+                    vix_ratio_diag = f"【比率高位常规自满】当前比率({ratio:.3f})处于1.15-1.25敏感带{ema_info}，快线维持在慢线上方。市场多头乐观情绪正常化积压，可持股但禁止加杠杆。"
             else:
-                vix_ratio_diag = f"【比率常态均衡】当前比率({ratio:.3f})在Contango常态中轴稳健运行，期限结构保持常态健康。"
+                vix_ratio_diag = f"【比率常态健康中轴】当前比率({ratio:.3f})在1.0-1.15 Contango区间稳健运行{ema_info}。期限结构和情绪动能健康，大盘暂无宏观性异动异变风险。"
 
+            # VIX现货分项诊断
             if vix >= 24.0:
-                vix_spot_diag = f"【现货恐慌爆发】当前VIX现货飙升至 {vix:.2f}，突破24.0恐慌红线，市场恐慌共振剧烈，宣泄抛压进行时。"
+                vix_spot_diag = f"【现货恐慌爆发】当前VIX现货飙升至 {vix:.2f}，突破24.0恐慌红线，全市场做空期权对冲踩踏剧烈，抛压处于高位宣泄状态。"
             elif vix < 13.5:
-                vix_spot_diag = f"【现货极低自满】当前VIX现货极低为 {vix:.2f} (&lt;13.5)，期权空头完全无防备过度乐观，需严防黑天鹅异变。"
+                vix_spot_diag = f"【现货极低自满】当前VIX现货极低为 {vix:.2f} (&lt;13.5)，市场对潜在黑天鹅尾部风险毫无对冲防备，极易被动洗盘。"
             else:
-                vix_spot_diag = f"【现货常态理性】当前VIX现货为 {vix:.2f}，处于13.5-24.0的合理宽幅震荡区间，大盘暂无突发性异动风险。"
+                vix_spot_diag = f"【现货常态理性】当前VIX现货为 {vix:.2f}，处于合理宽幅震荡区间，情绪中性，大盘系统性踩踏概率较低。"
 
+            # 综合诊断状态标识
             if bottom_active:
                 if vix >= 24.0:
-                    vix_diag_status = "🚀 黄金抄底：现货高位恐慌 ✖ 期限比率完美修复"
+                    vix_diag_status = "🚀 黄金抄底：现货极端恐慌 ✖ 期限比率动能完美金叉修复"
                 else:
-                    vix_diag_status = "🟢 抄底激活：期限比率率先跨线上破平衡线"
+                    vix_diag_status = "🟢 抄底激活：期限比率率先跨线上破或低位动能金叉"
             elif top_active:
-                if ratio > 1.24 and vix < 13.5:
-                    vix_diag_status = "🚨 极度逃顶：现货极限自满 ✖ 比率升水极度超载"
+                if ratio >= 1.25 and vix < 13.5:
+                    vix_diag_status = "🚨 极度逃顶：现货极限自满 ✖ 比率>1.25极端过热超载"
+                elif fast_curr < slow_curr and ratio >= 1.15:
+                    vix_diag_status = "🚨 逃顶激活：高位敏感带均线死叉，多头做多动能确认转弱"
                 else:
-                    vix_diag_status = "🚨 风控激活：比率高位超载或情绪转弱筑顶逆转"
+                    vix_diag_status = "🚨 风控激活：比率结构破位跌破1.0平衡线"
             else:
                 if ratio <= 1.0 and vix >= 24.0:
-                    vix_diag_status = "🔴 严重防御：期限持续倒挂 ✖ 现货强恐慌宣泄"
+                    vix_diag_status = "🔴 严重防御：期限结构持续倒挂 ✖ 现货强恐慌快速抛售"
                 elif ratio <= 1.0:
-                    vix_diag_status = "🟡 风险提示：期限结构深陷持续倒挂冰点期"
-                elif 1.20 <= ratio <= 1.24:
-                    if vix < 13.5:
-                        vix_diag_status = "🟡 风险提示：双重自满情绪严重积压（建议收紧止盈线）"
-                    else:
-                        vix_diag_status = "🟡 风险提示：市场多头自满情绪常态化积压"
+                    vix_diag_status = "🟡 风险提示：期限结构深陷倒挂（微观EMA呈现低位金叉转机）" if fast_curr > slow_curr else "🟡 风险提示：期限结构深陷持续倒挂冰点期"
+                elif 1.15 <= ratio < 1.25:
+                    vix_diag_status = "🟡 风险提示：高位自满情绪规律性压制（建议提高保护性止盈）"
                 else:
                     if vix < 13.5:
-                        vix_diag_status = "🟡 风险提示：现货隐含波动率极低，保留左侧防备"
+                        vix_diag_status = "🟡 风险提示：现货波动率处于绝对低位，保留左侧防御风险"
                     else:
-                        vix_diag_status = "🟢 状态中性：健康均衡牛市状态"
+                        vix_diag_status = "🟢 状态中性：健康常态化牛市状态"
             
             return {
                 "vix": round(vix, 2), "vix3m": round(vix3m, 2), "ratio": round(ratio, 3), "prev_ratio": round(prev_ratio, 3),
@@ -531,22 +578,22 @@ switches = [
         "last_updated": now_str
     },
     {
-        "id": 2,
-        "name": "VIX 期限结构与情绪指标",
-        "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
-        "top_active": vix_data["top_active"] if not vix_data["error"] else False,
-        "value": f"今日比率: {vix_data.get('ratio', 'N/A')} (昨日: {vix_data.get('prev_ratio', 'N/A')}) | VIX现货: {vix_data.get('vix', 'N/A')}",
-        "source": "CBOE 波动率曲线",
-        "desc_bottom": "【抄底激活标准：比率升上1】当隐含波动率期限结构打破极度深度倒挂状态、向上收复平衡线时激活，标志着非理性抛售流动性枯竭，转入安全抄底期。",
-        "desc_top": "【逃顶激活标准：比率跌破1，或今日比率突破 >1.24】期限结构基石意外松动，或者Contango升水极度超载，显示风险资产做空波动率策略无脑拥挤，极易诱发多杀多踩踏性闪崩。",
-        "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
-            f"<b>当下状态：</b>{vix_data.get('vix_diag_status')}<br>"
-            f"<b>⚖️ 比率分项：</b>{vix_data.get('vix_ratio_diag')}<br>"
-            f"<b>📊 现货分项：</b>{vix_data.get('vix_spot_diag')}"
-        ),
-        "update_cycle": "盘中实时波动 (YF延迟)",
-        "last_updated": now_str
-    },
+            "id": 2,
+            "name": "VIX 期限结构与趋势动能雷达",
+            "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
+            "top_active": vix_data["top_active"] if not vix_data["error"] else False,
+            "value": f"今日比率: {vix_data.get('ratio', 'N/A')} | EMA5/21状态: {'快线上穿/多头' if vix_data['bottom_active'] else '死叉/发散'} | VIX现货: {vix_data.get('vix', 'N/A')}",
+            "source": "CBOE 波动率期限结构交叉矩阵",
+            "desc_bottom": "【双向修复抄底标准】当隐含波动率比率向上收复突破 1.0 平衡线（摆脱远期深度倒挂状态），或者在低位倒挂修复带(<=1.05)确立微观动能均线金叉（EMA5 > EMA21）时激活。这标志着全市场非理性非对称抛售流动性枯竭，买盘筹码右侧转折确立，转入高胜率抄底期。",
+            "desc_top": "【三维立体逃顶标准】满足以下任一核心条件立即拉响风控防御：①比率冲破 1.25 绝对贪婪上限，期权空头无防备极度拥挤；②比率跌破 1.0 平衡线，长短期期限结构倒挂、牛市基石全面动摇；③比率在高位自满警戒带(>=1.15)发生了 EMA5 下穿 EMA21 死叉，显示做多边际买盘已经枯竭见顶。",
+            "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
+                f"<b>当下状态：</b>{vix_data.get('vix_diag_status')}<br>"
+                f"<b>⚖️ 比率动能分项：</b>{vix_data.get('vix_ratio_diag')}<br>"
+                f"<b>📊 现货波动分项：</b>{vix_data.get('vix_spot_diag')}"
+            ),
+            "update_cycle": "盘中实时波动 (YF延迟)",
+            "last_updated": now_str
+        },
     {
         "id": 3,
         "name": "加密离岸高杠杆流动性前哨",
@@ -677,7 +724,7 @@ for i, s in enumerate(switches):
             box_class = "status-neutral"
             badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
         
-        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8.5pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
+        metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
         
         # 【防御拦截逻辑】：将文本中的 < 和 > 转义为安全的 HTML 实体 &lt; 和 &gt;，避免吞噬后续组件
         safe_desc_bottom = s['desc_bottom'].replace('<', '&lt;').replace('>', '&gt;')
@@ -685,26 +732,26 @@ for i, s in enumerate(switches):
             
         st.markdown(f"""
         <div class="metric-box {box_class}">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-size: 11pt; font-weight: bold; color: #2c3e50;">开关 {s['id']}: {s['name']}</span>
+            <div class="switch-head">
+                <span class="switch-title">开关 {s['id']}: {s['name']}</span>
                 {badge_html}
             </div>
             <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eee;">
-            <p style="margin: 2px 0; font-size:10pt;"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
-            <p style="margin: 2px 0 6px 0; font-size:9.5pt;"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></p>
+            <p class="switch-value"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
+            <div class="switch-status"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></div>
         </div>
         """, unsafe_allow_html=True)
 
         with st.expander("🔘 点击展开：多空防守边界逻辑", expanded=False):
             st.markdown(f"""
-            <div style="padding: 10px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #ffffff;">
-                <p style="margin: 0 0 8px 0; font-size: 9.5pt; line-height: 1.5;"><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
-                <p style="margin: 0; font-size: 9.5pt; line-height: 1.5;"><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
+            <div class="switch-boundary-panel">
+                <p><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
+                <p><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
             </div>
             """, unsafe_allow_html=True)
 
         st.markdown(f"""
-        <div style="margin: 5px 0 15px 0; color: #7f8c8d; font-size: 8.5pt;">
+        <div class="switch-footer">
             🧭 数据来源: {s['source']}
             {metadata_line}
         </div>
@@ -815,10 +862,43 @@ with tab2:
             st.plotly_chart(fig_vix_spot, use_container_width=True)
         with v_col2:
             fig_vix_ratio = go.Figure()
-            fig_vix_ratio.add_trace(go.Scatter(x=v_df.index, y=v_df['Ratio'], name="VIX3M / VIX 比率", line=dict(color="#9b59b6", width=2)))
-            fig_vix_ratio.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", annotation_text="Contango 线 (1.0)")
-            fig_vix_ratio.add_hline(y=1.24, line_dash="dash", line_color="#e74c3c", annotation_text="极端自满 (1.24)")
-            fig_vix_ratio.update_layout(title_text="图表 B: VIX3M / VIX 期限结构比率", template="plotly_white", height=400)
+            
+            # 绘制真实计算期限比率基线
+            fig_vix_ratio.add_trace(go.Scatter(
+                x=v_df.index, y=v_df['Ratio'], 
+                name="真实期限比率 (VIX3M / VIX)", 
+                line=dict(color="#bdc3c7", width=1.2, dash='solid')
+            ))
+            
+            # 【核心补充】引入 EMA5 微观快线
+            if 'Ratio_Fast' in v_df.columns:
+                fig_vix_ratio.add_trace(go.Scatter(
+                    x=v_df.index, y=v_df['Ratio_Fast'], 
+                    name="EMA5 (微观脉冲快线)", 
+                    line=dict(color="#e74c3c", width=2.2)
+                ))
+                
+            # 【核心补充】引入 EMA21 趋势慢线
+            if 'Ratio_Slow' in v_df.columns:
+                fig_vix_ratio.add_trace(go.Scatter(
+                    x=v_df.index, y=v_df['Ratio_Slow'], 
+                    name="EMA21 (多空大趋势线)", 
+                    line=dict(color="#2c3e50", width=2.2)
+                ))
+            
+            # 绘制更精准的区间分界线锚点
+            fig_vix_ratio.add_hline(y=1.0, line_dash="dash", line_color="#2ecc71", annotation_text="Contango 恐慌修复平衡线 (1.0)", annotation_position="top left")
+            fig_vix_ratio.add_hline(y=1.25, line_dash="dash", line_color="#e74c3c", annotation_text="极限自满防御高压线 (1.25)", annotation_position="bottom left")
+            
+            # 新增一条 1.15 的自满预警警戒中线，方便前瞻性减仓决策
+            fig_vix_ratio.add_hline(y=1.15, line_dash="dot", line_color="#f39c12", annotation_text="高位自满警戒线 (1.15)")
+            
+            fig_vix_ratio.update_layout(
+                title_text="图表 B: VIX3M / VIX 期限结构动能雷达 (均线交叉 ✖ 区间风控决策模型)", 
+                template="plotly_white", 
+                height=400,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
             st.plotly_chart(fig_vix_ratio, use_container_width=True)
 
 # --- TAB 3 ---
