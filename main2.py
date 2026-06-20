@@ -187,48 +187,75 @@ def fetch_vix_data():
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
     try:
+        # 1. 获取 BTC 日级别 K 线数据 (判断价格趋势)
+        # 使用 yfinance 获取最近5天的日线数据
+        btc_df = yf.download('BTC-USD', period='5d', interval='1d', progress=False)['Close']
+        btc_df = btc_df.ffill()
+        current_price = btc_df.iloc[-1].item() if isinstance(btc_df.iloc[-1], pd.Series) else btc_df.iloc[-1]
+        prev_price = btc_df.iloc[-2].item() if isinstance(btc_df.iloc[-2], pd.Series) else btc_df.iloc[-2]
+        
+        price_up = current_price > prev_price
+        price_trend_str = f"上涨 (较昨日)" if price_up else f"下跌 (较昨日)"
+
+        # 2. 获取 OKX 实时资金费率
         fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
         fr_res = requests.get(fr_url, timeout=5).json()
         if fr_res.get("code") != "0":
-            return {"error": True, "msg": "OKX API 异常", "bottom_active": False, "top_active": False, "fetched_at": "API错误"}
-            
+            raise Exception("OKX 费率 API 异常")
         funding_rate = float(fr_res['data'][0]['fundingRate']) * 100
+
+        # 3. 获取 OKX 日级别历史持仓量 (OI) 趋势
+        # 使用 OKX Rubik 统计接口获取日级别的 OI 变化
+        rubik_url = "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume?ccy=BTC&period=1D"
+        rubik_res = requests.get(rubik_url, timeout=5).json()
         
-        oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
-        oi_res = requests.get(oi_url, timeout=5).json()
-        if oi_res.get("code") != "0":
-            return {"error": True, "msg": "获取 OI 数据异常", "bottom_active": False, "top_active": False, "fetched_at": "API错误"}
-            
-        open_interest = float(oi_res['data'][0]['oiCcy'])
+        oi_up = False
+        oi_trend_str = "未知"
+        current_oi = 0
         
-        hist_df = None
-        prev_funding_rate = 0.0
-        try:
-            hist_url = "https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=60"
-            hist_res = requests.get(hist_url, timeout=5).json()
-            if hist_res.get("code") == "0":
-                text_data = hist_res['data']
-                hist_df = pd.DataFrame(text_data)
-                hist_df['fundingTime'] = pd.to_datetime(hist_df['fundingTime'].astype(float), unit='ms')
-                hist_df['fundingRate'] = hist_df['fundingRate'].astype(float) * 100
-                hist_df = hist_df.sort_values('fundingTime')
-                
-                if len(hist_df) >= 2:
-                    prev_funding_rate = hist_df.iloc[-2]['fundingRate']
-        except:
-            pass  
+        if rubik_res.get("code") == "0" and len(rubik_res.get("data", [])) >= 2:
+            # 数据格式: [时间戳, OI(币本位), 交易量...]
+            current_oi = float(rubik_res['data'][0][1])
+            prev_oi = float(rubik_res['data'][1][1])
+            oi_up = current_oi > prev_oi
+            oi_trend_str = "大幅上升" if current_oi > prev_oi * 1.05 else ("上升" if oi_up else "下降")
+        else:
+            # 如果历史接口失败，降级使用实时快照接口
+            oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
+            oi_res = requests.get(oi_url, timeout=5).json()
+            current_oi = float(oi_res['data'][0]['oiCcy'])
+            oi_trend_str = "无历史对比"
+
+        # 4. 核心逻辑矩阵：组合诊断 (价格 + OI + 费率)
+        bottom_active = False
+        top_active = False
         
-        bottom_active = (prev_funding_rate < 0) and (funding_rate > 0)
-        top_active = funding_rate >= 0.01
-        
+        if price_up and oi_up and funding_rate >= 0.01:
+            diag_status = "🚨 【极度危险/逃顶】价格上涨 ✖ OI飙升 ✖ 费率极高(>=0.01%)。杠杆多头极度拥挤，随时可能引发“插针”连环爆仓。"
+            top_active = True
+        elif not price_up and oi_up and funding_rate < 0:
+            diag_status = "🟡 【轧空预警/博弈】价格下跌 ✖ OI飙升 ✖ 费率转负。空头大举建仓，需严防主力突然拉升触发“逼空(Short Squeeze)”暴力反弹。"
+        elif not price_up and not oi_up and funding_rate <= 0:
+            diag_status = "🟢 【黄金右侧/抄底】价格下跌 ✖ OI下降 ✖ 费率触底/转负。恐慌盘宣泄完毕，多头爆仓出清，杠杆泡沫刺破，极佳的左侧/右侧买点。"
+            bottom_active = True
+        elif price_up and not oi_up:
+            diag_status = "⚠️ 【假突破预警/缩量】价格上涨 ✖ OI下降。缺乏新现货资金追高，纯靠空头平仓（踏空回补）推动，上涨大概率不可持续。"
+            top_active = True
+        elif price_up and oi_up and 0 <= funding_rate < 0.01:
+            diag_status = "📈 【健康延续/持仓】价格上涨 ✖ OI上升 ✖ 费率正常。真金白银健康流入市场，多头趋势良性延续。"
+        else:
+            diag_status = f"⚪ 【震荡博弈/观望】价格{price_trend_str}，OI{oi_trend_str}，费率({funding_rate:.4f}%) 未达极端阈值，方向不明确。"
+
         return {
+            "btc_price": f"${current_price:,.2f}",
+            "price_trend": price_trend_str,
+            "oi": f"{current_oi:,.0f} BTC",
+            "oi_trend": oi_trend_str,
             "funding_rate": f"{funding_rate:.4f}%", 
-            "prev_funding_rate": f"{prev_funding_rate:.4f}%",
-            "oi": f"{open_interest:,.0f}",
+            "diag_status": diag_status,
             "bottom_active": bottom_active, 
             "top_active": top_active, 
             "error": False,
-            "hist_df": hist_df,
             "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     except Exception as e:
@@ -596,21 +623,17 @@ switches = [
         },
     {
         "id": 3,
-        "name": "加密离岸高杠杆流动性前哨",
+        "name": "加密离岸高杠杆流动性前哨 (Price+OI+FR 矩阵)",
         "bottom_active": crypto_data["bottom_active"] if not crypto_data["error"] else False,
         "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
-        "value": f"当前费率: {crypto_data.get('funding_rate', 'N/A')} (前值: {crypto_data.get('prev_funding_rate', 'N/A')}) | OI: {crypto_data.get('oi', 'N/A')}",
-        "source": "OKX 永续合约 API",
-        "desc_bottom": "【抄底激活标准：费率由负转正】这代表空头爆仓踩踏结束，多头资金左侧重新建仓，是大盘恐慌盘出清的重要风向标。",
-        "desc_top": "【逃顶激活标准：费率 >= 0.01%】即资金费率突破轻微过热线且 OI 处于高位。这代表多头杠杆出现超载隐患，极易触发多杀多洗盘闪崩。",
+        "value": f"BTC现货: {crypto_data.get('btc_price', 'N/A')} ({crypto_data.get('price_trend', '')}) | OI: {crypto_data.get('oi', 'N/A')} ({crypto_data.get('oi_trend', '')}) | 费率: {crypto_data.get('funding_rate', 'N/A')}",
+        "source": "Yahoo Finance (K线) ✖ OKX 永续合约实时 API (OI与资金费率)",
+        "desc_bottom": "【缩量爆仓抄底】当 **价格下跌 + OI显著下降 + 费率转负**。代表做多杠杆被彻底清算，市场流动性恐慌见底，是高胜率左侧或右侧建仓点。",
+        "desc_top": "【拥挤过载逃顶】触发两种情况立即防御：① **价格上涨 + OI上升 + 费率极高** (多头拥挤，极易被爆)；② **价格上涨 + OI下降** (缺乏新资金的假突破)。",
         "fetched_status": "数据抓取失败 🔴" if crypto_data["error"] else (
-            f"🚨 预警：触发逃顶标准，多头杠杆超载过热 (当前 {crypto_data.get('funding_rate')})" if crypto_data["top_active"] else (
-                f"🟢 激活：触发抄底标准，空头无脑割肉出清 (前值 {crypto_data.get('prev_funding_rate')} 转正为 {crypto_data.get('funding_rate')})" if crypto_data["bottom_active"] else (
-                    "⚪ 状态中性：离岸高杠杆状态稳定，当前费率未触发任何极端阈值"
-                )
-            )
+            f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#2c3e50;'>{crypto_data.get('diag_status')}</div>"
         ),
-        "update_cycle": "7x24小时 实时获取",
+        "update_cycle": "日线级别清洗 ✖ 盘中实时快照",
         "last_updated": now_str
     },
     {
