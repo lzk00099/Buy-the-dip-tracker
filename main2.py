@@ -926,15 +926,38 @@ with tab2:
 
 # --- TAB 3 ---
 with tab3:
-    if not crypto_data["error"] and crypto_data.get("hist_df") is not None:
-        c_df = crypto_data["hist_df"]
-        fig_crypto = go.Figure()
-        fig_crypto.add_trace(go.Scatter(x=c_df['fundingTime'], y=c_df['fundingRate'], name="BTC 资金费率 (%)", line=dict(color="#f1c40f", width=2)))
-        fig_crypto.add_hline(y=0.0, line_dash="solid", line_color="#7f8c8d")
-        fig_crypto.add_hline(y=0.01, line_dash="dash", line_color="#e74c3c", annotation_text="多头超载边界 (>=0.01%)")
-        fig_crypto.update_layout(title_text="OKX BTC-USDT-SWAP 历史资金费率", template="plotly_white", height=400)
-        st.plotly_chart(fig_crypto, use_container_width=True)
+    if not crypto_data["error"] and "hist_df" in crypto_data:
+        df = crypto_data["hist_df"]
+        
+        # 创建联动图表
+        fig = make_subplots(
+            rows=3, cols=1, 
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            subplot_titles=("BTC 价格趋势", "持仓量(OI) 变化", "资金费率 (%)"),
+            row_heights=[0.4, 0.3, 0.3]
+        )
 
+        # 1. 价格 (使用折线)
+        fig.add_trace(go.Scatter(x=df['ts'], y=df['oi'], name="OI趋势", line=dict(color="#3498db")), row=1, col=1)
+        
+        # 2. 持仓量 (使用柱状)
+        fig.add_trace(go.Bar(x=df['ts'], y=df['oi'], name="持仓量(OI)", marker_color="#9b59b6"), row=2, col=1)
+        
+        # 3. 资金费率 (根据正负设色)
+        colors = ['#e74c3c' if float(val) >= 0 else '#2ecc71' for val in df['fr']]
+        fig.add_trace(go.Bar(x=df['ts'], y=df['fr'].astype(float)*100, name="费率", marker_color=colors), row=3, col=1)
+
+        # 辅助线
+        fig.add_hline(y=0.01, row=3, col=1, line_dash="dash", line_color="#e74c3c", annotation_text="多头超载")
+        fig.add_hline(y=0, row=3, col=1, line_color="#7f8c8d")
+
+        fig.update_layout(height=600, template="plotly_white", showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.info("💡 **对照说明**：当下方费率柱变红(>=0.01)且上方OI柱同步飙升时，对应开关的【逃顶预警】；当费率柱变绿且OI缩量时，对应【抄底信号】。")
+    else:
+        st.error("数据加载失败，请检查网络连接或API接口。")
 # --- TAB 4 ---
 with tab4:
     if not quant_data["error"] and "df_hist" in quant_data:
