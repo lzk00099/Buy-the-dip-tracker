@@ -925,15 +925,29 @@ with tab2:
             st.plotly_chart(fig_vix_ratio, use_container_width=True)
 
 # --- TAB 3 ---
-with tab3:
-    if not crypto_data["error"] and crypto_data.get("hist_df") is not None:
-        c_df = crypto_data["hist_df"]
-        fig_crypto = go.Figure()
-        fig_crypto.add_trace(go.Scatter(x=c_df['fundingTime'], y=c_df['fundingRate'], name="BTC 资金费率 (%)", line=dict(color="#f1c40f", width=2)))
-        fig_crypto.add_hline(y=0.0, line_dash="solid", line_color="#7f8c8d")
-        fig_crypto.add_hline(y=0.01, line_dash="dash", line_color="#e74c3c", annotation_text="多头超载边界 (>=0.01%)")
-        fig_crypto.update_layout(title_text="OKX BTC-USDT-SWAP 历史资金费率", template="plotly_white", height=400)
-        st.plotly_chart(fig_crypto, use_container_width=True)
+# 假设这是你的 UI 渲染部分
+tabs = st.tabs(["Tab 1", "Tab 2", "Tab 3: 加密货币/离岸流动性"])
+
+with tabs[2]: # 即 tab3
+    switch3_data = switches[2] # 获取第3个开关的数据
+    
+    # 1. 样式封装：根据是否触发警告调整颜色
+    status_class = "status-top-active" if switch3_data["top_active"] else \
+                   ("status-bottom-active" if switch3_data["bottom_active"] else "status-neutral")
+    
+    # 2. 渲染卡片标题与值
+    st.markdown(f'<div class="metric-box {status_class}">', unsafe_allow_html=True)
+    st.markdown(f'<div class="switch-title">{switch3_data["name"]}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="switch-value">{switch3_data["value"]}</div>', unsafe_allow_html=True)
+    
+    # 3. 渲染具体的逻辑诊断文本
+    # 如果 top_active 为 True，渲染 desc_top，否则渲染 desc_bottom
+    diag_text = switch3_data["desc_top"] if switch3_data["top_active"] else switch3_data["desc_bottom"]
+    st.markdown(f'<div class="switch-status">{diag_text}</div>', unsafe_allow_html=True)
+    
+    # 4. 底部元数据
+    st.markdown(f'<div class="switch-footer">更新周期: {switch3_data["update_cycle"]} | 最后更新: {switch3_data["last_updated"]}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 # --- TAB 4 ---
 with tab4:
     if not quant_data["error"] and "df_hist" in quant_data:
