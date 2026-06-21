@@ -187,79 +187,108 @@ def fetch_vix_data():
 @st.cache_data(ttl=1800)
 def fetch_crypto_signals():
     try:
-        # 1. 获取 BTC 日级别 K 线数据 (判断价格趋势)
-        # 使用 yfinance 获取最近5天的日线数据
-        btc_df = yf.download('BTC-USD', period='5d', interval='1d', progress=False)['Close']
-        btc_df = btc_df.ffill()
-        current_price = btc_df.iloc[-1].item() if isinstance(btc_df.iloc[-1], pd.Series) else btc_df.iloc[-1]
-        prev_price = btc_df.iloc[-2].item() if isinstance(btc_df.iloc[-2], pd.Series) else btc_df.iloc[-2]
+        # 1. 统一获取币安 BTCUSDT U本位合约历史数据进行时间轴对齐
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
         
+        # 获取日线级别 K线 (最近30天)
+        klines_url = "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limit=30"
+        k_res = requests.get(klines_url, headers=headers, timeout=5).json()
+        df_price = pd.DataFrame(k_res, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
+        df_price['timestamp'] = pd.to_datetime(df_price['timestamp'], unit='ms').dt.normalize()
+        df_price['close'] = df_price['close'].astype(float)
+        df_price = df_price[['timestamp', 'close']].set_index('timestamp')
+
+        # 获取历史 OI (持仓价值, USD) (最近30天)
+        oi_url = "https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=1d&limit=30"
+        oi_res = requests.get(oi_url, headers=headers, timeout=5).json()
+        df_oi = pd.DataFrame(oi_res)
+        df_oi['timestamp'] = pd.to_datetime(df_oi['timestamp'], unit='ms').dt.normalize()
+        df_oi['oi_usd'] = df_oi['sumOpenInterestValue'].astype(float)
+        # 每日可能有多个快照，取均值聚合
+        df_oi = df_oi.groupby('timestamp')['oi_usd'].mean().to_frame()
+
+        # 获取资金费率历史 (最近90天)
+        fr_url = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=90"
+        fr_res = requests.get(fr_url, headers=headers, timeout=5).json()
+        df_fr = pd.DataFrame(fr_res)
+        df_fr['timestamp'] = pd.to_datetime(df_fr['fundingTime'], unit='ms').dt.normalize()
+        df_fr['funding_rate'] = df_fr['fundingRate'].astype(float) * 100
+        # 将每日8小时结算的多次费率计算为日均值
+        df_fr = df_fr.groupby('timestamp')['funding_rate'].mean().to_frame()
+
+        # 2. 合并数据集，保证时间轴绝对对齐
+        df_merged = df_price.join(df_oi, how='inner').join(df_fr, how='inner')
+        df_merged = df_merged.sort_index().ffill()
+
+        if df_merged.empty or len(df_merged) < 7:
+            raise Exception("API数据合并为空或样本不足")
+
+        # 3. 计算平滑均线，用趋势极值而非日内噪音来判断
+        df_merged['oi_ma7'] = df_merged['oi_usd'].rolling(7).mean()
+        df_merged['price_ma7'] = df_merged['close'].rolling(7).mean()
+        df_merged = df_merged.dropna()
+
+        current_row = df_merged.iloc[-1]
+        prev_row = df_merged.iloc[-2]
+
+        current_price = current_row['close']
+        prev_price = prev_row['close']
+        current_oi = current_row['oi_usd']
+        oi_ma7 = current_row['oi_ma7']
+        current_fr = current_row['funding_rate']
+
+        # 状态提取
         price_up = current_price > prev_price
-        price_trend_str = f"上涨 (较昨日)" if price_up else f"下跌 (较昨日)"
+        price_trend_str = "上涨" if price_up else "下跌"
+        oi_trend_str = "显著扩张" if current_oi > oi_ma7 * 1.05 else ("温和扩张" if current_oi >= oi_ma7 else "萎缩清算")
 
-        # 2. 获取 OKX 实时资金费率
-        fr_url = "https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP"
-        fr_res = requests.get(fr_url, timeout=5).json()
-        if fr_res.get("code") != "0":
-            raise Exception("OKX 费率 API 异常")
-        funding_rate = float(fr_res['data'][0]['fundingRate']) * 100
-
-        # 3. 获取 OKX 日级别历史持仓量 (OI) 趋势
-        # 使用 OKX Rubik 统计接口获取日级别的 OI 变化
-        rubik_url = "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume?ccy=BTC&period=1D"
-        rubik_res = requests.get(rubik_url, timeout=5).json()
-        
-        oi_up = False
-        oi_trend_str = "未知"
-        current_oi = 0
-        
-        if rubik_res.get("code") == "0" and len(rubik_res.get("data", [])) >= 2:
-            # 数据格式: [时间戳, OI(币本位), 交易量...]
-            current_oi = float(rubik_res['data'][0][1])
-            prev_oi = float(rubik_res['data'][1][1])
-            oi_up = current_oi > prev_oi
-            oi_trend_str = "大幅上升" if current_oi > prev_oi * 1.05 else ("上升" if oi_up else "下降")
-        else:
-            # 如果历史接口失败，降级使用实时快照接口
-            oi_url = "https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP"
-            oi_res = requests.get(oi_url, timeout=5).json()
-            current_oi = float(oi_res['data'][0]['oiCcy'])
-            oi_trend_str = "无历史对比"
-
-        # 4. 核心逻辑矩阵：组合诊断 (价格 + OI + 费率)
+        # 4. 优化核心逻辑矩阵：降低触发频率，提高阈值准确度
         bottom_active = False
         top_active = False
         
-        if price_up and oi_up and funding_rate >= 0.01:
-            diag_status = "🚨 【极度危险/逃顶】价格上涨 ✖ OI飙升 ✖ 费率极高(>=0.01%)。杠杆多头极度拥挤，随时可能引发“插针”连环爆仓。"
+        # 逃顶：多头过载（修改原本的 0.01% 至 0.025% 真实过热线，且结合均线偏移）
+        if current_price > current_row['price_ma7'] and current_oi > oi_ma7 * 1.03 and current_fr >= 0.025:
+            diag_status = "🚨 【极度危险/逃顶】价格多头 ✖ OI显著膨胀 ✖ 费率过热(>=0.025%)。杠杆极度拥挤，随时引发多头连环踩踏。"
             top_active = True
-        elif not price_up and oi_up and funding_rate < 0:
-            diag_status = "🟡 【轧空预警/博弈】价格下跌 ✖ OI飙升 ✖ 费率转负。空头大举建仓，需严防主力突然拉升触发“逼空(Short Squeeze)”暴力反弹。"
-        elif not price_up and not oi_up and funding_rate <= 0:
-            diag_status = "🟢 【黄金右侧/抄底】价格下跌 ✖ OI下降 ✖ 费率触底/转负。恐慌盘宣泄完毕，多头爆仓出清，杠杆泡沫刺破，极佳的左侧/右侧买点。"
+            
+        # 博弈预警：价格弱势但 OI 逆势飙升
+        elif current_price < current_row['price_ma7'] and current_oi > oi_ma7 * 1.05 and current_fr < -0.01:
+            diag_status = "🟡 【轧空预警/博弈】价格弱势 ✖ OI逆势飙升 ✖ 费率深度转负。空头大军集结，需严防主力无预警暴力“逼空(Squeeze)”。"
+            
+        # 抄底：黄金右侧结构
+        elif current_price < current_row['price_ma7'] and current_oi < oi_ma7 * 0.95 and current_fr <= 0.005:
+            diag_status = "🟢 【黄金右侧/抄底】价格回落 ✖ OI深度清算 ✖ 费率降温触底。杠杆泡沫出清完毕，具备极佳的右侧筑底赔率。"
             bottom_active = True
-        elif price_up and not oi_up:
-            diag_status = "⚠️ 【假突破预警/缩量】价格上涨 ✖ OI下降。缺乏新现货资金追高，纯靠空头平仓（踏空回补）推动，上涨大概率不可持续。"
+            
+        # 假突破：现货无买盘
+        elif price_up and current_oi < oi_ma7 * 0.92:
+            diag_status = "⚠️ 【假突破预警/缩量】价格反弹 ✖ OI显著萎缩。缺乏现货真实买盘，上涨系空头平仓(踏空回补)推动，动能难以为继。"
             top_active = True
-        elif price_up and oi_up and 0 <= funding_rate < 0.01:
-            diag_status = "📈 【健康延续/持仓】价格上涨 ✖ OI上升 ✖ 费率正常。真金白银健康流入市场，多头趋势良性延续。"
+            
+        # 常规健康持仓
+        elif current_price >= current_row['price_ma7'] and current_oi >= oi_ma7 * 0.95 and 0.005 <= current_fr < 0.025:
+            diag_status = "📈 【健康延续/持仓】价格企稳 ✖ OI支撑 ✖ 费率常态。真金白银良性流入，多头趋势稳健延续。"
+            
         else:
-            diag_status = f"⚪ 【震荡博弈/观望】价格{price_trend_str}，OI{oi_trend_str}，费率({funding_rate:.4f}%) 未达极端阈值，方向不明确。"
+            diag_status = f"⚪ 【震荡博弈/观望】价格均线缠绕，OI变动平缓({oi_trend_str})，系统处于风险真空期。"
 
         return {
             "btc_price": f"${current_price:,.2f}",
             "price_trend": price_trend_str,
-            "oi": f"{current_oi:,.0f} BTC",
+            "oi": f"${current_oi/1e8:,.2f} 亿", # 转为亿美金便于前台阅读
             "oi_trend": oi_trend_str,
-            "funding_rate": f"{funding_rate:.4f}%", 
+            "funding_rate": f"{current_fr:.4f}%", 
             "diag_status": diag_status,
             "bottom_active": bottom_active, 
             "top_active": top_active, 
             "error": False,
+            "hist_df": df_merged.tail(20), # 取最近20天提供给前端制图
             "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     except Exception as e:
-        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "网络穿透异常"}
+        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "数据断流异常"}
 
 @st.cache_data(ttl=3600)
 def fetch_squeezemetrics_data():
@@ -925,16 +954,53 @@ with tab2:
             st.plotly_chart(fig_vix_ratio, use_container_width=True)
 
 # --- TAB 3 ---
-# 假设这是你的 UI 渲染部分
 with tab3:
-    if not crypto_data["error"] and crypto_data.get("hist_df") is not None:
+    if not crypto_data.get("error", True) and crypto_data.get("hist_df") is not None:
         c_df = crypto_data["hist_df"]
-        fig_crypto = go.Figure()
-        fig_crypto.add_trace(go.Scatter(x=c_df['fundingTime'], y=c_df['fundingRate'], name="BTC 资金费率 (%)", line=dict(color="#f1c40f", width=2)))
-        fig_crypto.add_hline(y=0.0, line_dash="solid", line_color="#7f8c8d")
-        fig_crypto.add_hline(y=0.01, line_dash="dash", line_color="#e74c3c", annotation_text="多头超载边界 (>=0.01%)")
-        fig_crypto.update_layout(title_text="OKX BTC-USDT-SWAP 历史资金费率", template="plotly_white", height=400)
+        
+        # 创建包含主副 Y 轴的折线图
+        fig_crypto = make_subplots(specs=[[{"secondary_y": True}]])
+        
+        # 主 Y 轴：全网合约持仓量 (OI)
+        fig_crypto.add_trace(
+            go.Scatter(
+                x=c_df.index, y=c_df['oi_usd'] / 1e8, 
+                name="全网持仓量 (亿美元)", 
+                line=dict(color="#3498db", width=2, shape='spline'),
+                fill='tozeroy', fillcolor='rgba(52, 152, 219, 0.1)'
+            ),
+            secondary_y=False,
+        )
+        
+        # 副 Y 轴：资金费率
+        fig_crypto.add_trace(
+            go.Scatter(
+                x=c_df.index, y=c_df['funding_rate'], 
+                name="日均资金费率 (%)", 
+                line=dict(color="#f1c40f", width=2.5, dash='dot')
+            ),
+            secondary_y=True,
+        )
+        
+        # 增加基准线和预警线
+        fig_crypto.add_hline(y=0.0, secondary_y=True, line_dash="solid", line_color="#7f8c8d", opacity=0.5)
+        fig_crypto.add_hline(y=0.025, secondary_y=True, line_dash="dash", line_color="#e74c3c", annotation_text="资金费率过热线 (0.025%)")
+        
+        # 调整布局和标题
+        fig_crypto.update_layout(
+            title_text="离岸高杠杆雷达：BTC 持仓规模清洗与费率走势双重校验", 
+            template="plotly_white", 
+            height=400,
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        
+        fig_crypto.update_yaxes(title_text="<b>持仓量 (亿美元)</b>", secondary_y=False)
+        fig_crypto.update_yaxes(title_text="<b>日均资金费率 (%)</b>", secondary_y=True)
+        
         st.plotly_chart(fig_crypto, use_container_width=True)
+    else:
+        st.warning("⚠️ 加密离岸流动性数据加载失败或数据样本不足，无法渲染图表。")
     
 # --- TAB 4 ---
 with tab4:
