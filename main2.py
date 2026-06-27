@@ -455,6 +455,10 @@ def calculate_quant_and_breadth_signals():
         
         market_high = data['SPY'].iloc[-1] > data['SPY'].rolling(50).mean().iloc[-1]
         
+        corr_risk_level = "数据风险"
+        corr_risk_diag = "CBOE 数据断层，暂停象限判断。"
+        corr_high_risk_active = False
+
         if corr_is_broken:
             corr_diag, disp_diag, combined_diag = "流断裂", "流断裂", "数据断层"
             corr_bottom_active = breadth_top_active = False
@@ -470,12 +474,32 @@ def calculate_quant_and_breadth_signals():
             
             if c_golden_cross and d_is_high:
                 combined_diag = "⚡ 【象限 I: 双高危机】宏观剧震引发系统流动性冲击与内部结构剧烈撕裂并发（观望，严防无差别闪崩）"
+                corr_risk_level = "高风险"
+                corr_risk_diag = "相关性升温与离散度发散同步出现，说明指数层面与内部结构同时承压，容易从局部抱团扩散为系统波动。"
             elif c_golden_cross and not d_is_high:
                 combined_diag = "🔥 【象限 II: 泥沙俱下】纯粹的同频无差别恐慌抛售，相关性极高（等待 CBOE 快慢线死叉即可抄底）"
+                corr_risk_level = "中高风险"
+                corr_risk_diag = "相关性升温但离散度未发散，更多是同频杀跌，需等相关性死叉后再从防守转抄底。"
             elif c_dead_cross and d_is_high:
                 combined_diag = "🚨 【象限 III: 极致撕裂】大盘失真，资金极致抱团超级权重，掩护中小盘出货（触发终极广度逃顶线）"
+                corr_risk_level = "极高风险" if market_high or c_is_low else "高风险"
+                corr_risk_diag = "相关性退潮但离散度爆发，代表指数表面稳定、内部广度崩塌；若指数仍在高位，属于典型抱团掩护出货。"
             else:
                 combined_diag = "⏳ 【象限 IV: 均衡收敛】常态低波运行，系统性风险真空期，个股特异性健康回归"
+                if c_is_low and market_high:
+                    corr_risk_level = "中风险"
+                    corr_risk_diag = "相关性偏低且指数处于高位，市场缺少同涨支撑，但离散度尚未确认爆发。"
+                elif d_is_low and not c_is_low:
+                    corr_risk_level = "低风险"
+                    corr_risk_diag = "离散度收敛，板块内部结构较均衡，系统性尾部风险暂未抬头。"
+                else:
+                    corr_risk_level = "中性"
+                    corr_risk_diag = "相关性与离散度未形成极端共振，维持常规观察。"
+
+            if breadth_top_active:
+                corr_risk_level = "极高风险"
+            corr_high_risk_active = corr_risk_level in ("高风险", "极高风险")
+            breadth_top_active = breadth_top_active or corr_high_risk_active
 
         cboe_corr_text = f"相关性:{c_spot:.2f}(Z:{c_z:.1f})"
         cboe_disp_text = f"离散度:{d_spot:.2f}(Z:{d_z:.1f})"
@@ -505,6 +529,8 @@ def calculate_quant_and_breadth_signals():
             "corr_diag": corr_diag,          
             "disp_diag": disp_diag,      
             "combined_diag": combined_diag,  
+            "corr_risk_level": corr_risk_level,
+            "corr_risk_diag": corr_risk_diag,
             "df_hist": df_hist.tail(60)
         }
     except Exception as e:
@@ -606,21 +632,72 @@ quant_data = calculate_quant_and_breadth_signals()
 now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 vxn_vix_data = fetch_vxn_vix_data()
 
+def classify_sm_gex_dix_risk(gex_val, dix_val):
+    gex_abs = abs(gex_val)
+    gex_extreme = gex_abs >= 1_000_000_000
+    gex_neutral = gex_abs < 250_000_000
+
+    if gex_val < 0 and dix_val < 40.0:
+        risk_level = "极高风险"
+        diag = "🚨 【负Gamma放大器 ✖ DIX派发】做市商追跌对冲与暗池主力撤退共振，容易出现流动性断层、跳水和闪崩。"
+        bottom_active, top_active = False, True
+    elif gex_val < 0 and dix_val < 42.5:
+        risk_level = "高风险"
+        diag = "🚨 【负Gamma承压 ✖ DIX偏弱】盘面下跌会被对冲流进一步放大，暗池承接不足，反弹更像减仓窗口。"
+        bottom_active, top_active = False, True
+    elif gex_val >= 0 and dix_val < 40.0:
+        risk_level = "高风险"
+        diag = "🚨 【Gamma表面护盘 ✖ 暗池派发】指数可能被期权仓位暂时托住，但主力资金在暗处流出，属于高位钝刀出货。"
+        bottom_active, top_active = False, True
+    elif gex_val < 0 and dix_val >= 45.0:
+        risk_level = "中高风险" if not gex_extreme else "高风险"
+        diag = "🟠 【负Gamma波动 ✖ DIX吸筹】机构有承接但做市商仍是波动放大器，适合等待确认，不宜重仓追涨。"
+        bottom_active, top_active = False, gex_extreme
+    elif gex_val >= 0 and dix_val >= 45.0:
+        risk_level = "低风险/机会"
+        diag = "🟢 【正Gamma缓冲 ✖ DIX吸筹】做市商对冲提供安全垫，暗池主力同步承接，左侧筑底与趋势修复概率较高。"
+        bottom_active, top_active = True, False
+    elif gex_val >= 0 and 40.0 <= dix_val < 45.0:
+        risk_level = "中性偏稳" if not gex_neutral else "中性"
+        diag = "⚪ 【正Gamma缓冲 ✖ DIX中性】波动被压制但暗池没有强吸筹证据，适合常规仓位、等待方向选择。"
+        bottom_active, top_active = False, False
+    elif gex_val < 0 and 42.5 <= dix_val < 45.0:
+        risk_level = "中风险"
+        diag = "🟡 【负Gamma扰动 ✖ DIX中性】下跌仍可能被放大，但暗池并未明显派发，保持保护性止盈和仓位克制。"
+        bottom_active, top_active = False, False
+    else:
+        risk_level = "中性"
+        diag = "⚪ 【Gamma/DIX 均衡】没有形成明确的吸筹、派发或对冲放大共振，维持观察。"
+        bottom_active, top_active = False, False
+
+    if gex_extreme and gex_val < 0 and risk_level not in ("极高风险", "高风险"):
+        risk_level = "高风险"
+        diag += " 叠加 GEX 绝对值极端为负，任何价格破位都可能触发机械性追跌。"
+        top_active = True
+
+    return {
+        "risk_level": risk_level,
+        "diag": diag,
+        "bottom_active": bottom_active,
+        "top_active": top_active,
+    }
+
 if not sm_data["error"]:
     gex_val = sm_data.get('gex', 0)
     dix_val = sm_data.get('dix', 44.0)
+    sm_risk = classify_sm_gex_dix_risk(gex_val, dix_val)
     
-    sm_bottom_active = (gex_val > 0) and (dix_val >= 45.0)
-    sm_top_active = (gex_val < 0) or (dix_val < 40.0)
+    sm_bottom_active = sm_risk["bottom_active"]
+    sm_top_active = sm_risk["top_active"]
     
     if sm_data.get("is_mock", False):
         sm_status = "使用兜底数据 🟡"
     elif sm_top_active:
-        sm_status = "🚨 风险重压：空头敞口/机构派发"
+        sm_status = f"🚨 {sm_risk['risk_level']}：{sm_risk['diag']}"
     elif sm_bottom_active:
-        sm_status = "🟢 信号激活：Gamma护盘/暗池吸筹"
+        sm_status = f"🟢 {sm_risk['risk_level']}：{sm_risk['diag']}"
     else:
-        sm_status = "⚪ 状态中性：主力资金中性均衡"
+        sm_status = f"⚪ {sm_risk['risk_level']}：{sm_risk['diag']}"
 else:
     sm_bottom_active = False
     sm_top_active = False
@@ -635,8 +712,8 @@ switches = [
         "top_active": sm_top_active,
         "value": f"GEX: {gex_val:,} | DIX: {dix_val}%",
         "source": "SqueezeMetrics (暗池吸筹指数 & SPX期权对冲敞口)",
-        "desc_bottom": "【双向合力买入】GEX为正建立行情的安全垫，且暗池DIX突破45%大关，说明华尔街主力在暗池疯狂吃单承接，左侧筑底概率极高。",
-        "desc_top": "【双向共振杀跌】GEX转负导致做市商变成砸盘放大器，或DIX跌破40%暴露出明牌拉升时主力在悄悄分批派发利润，高位极易闪崩。",
+        "desc_bottom": "【低风险/机会】GEX为正建立行情安全垫，且 DIX>=45 显示暗池主力承接，属于正Gamma缓冲与机构吸筹共振。",
+        "desc_top": "【高风险预警】① GEX<0 且 DIX<40 为极高风险；② GEX<0 且 DIX<42.5、或 GEX>=0 但 DIX<40 为高风险；③ GEX<-10亿 即使 DIX吸筹也按高风险处理。所有高风险/极高风险均触发红色预警。",
         "fetched_status": sm_status,
         "update_cycle": "每日更新 (美东盘后)",
         "last_updated": now_str
@@ -698,9 +775,10 @@ switches = [
         "value": f"{quant_data.get('cboe_corr', 'N/A')} | {quant_data.get('cboe_disp', 'N/A')}",
         "source": "CBOE COR1M / DSPX 联动矩阵 (微观导数交叉 ✖ 滚动Z-Score状态机)",
         "desc_bottom": "【抄底激活：恐慌死叉✖撕裂收敛】当相关性极值冲顶后向下死叉确立（恐慌抛售衰退），且离散度未出现背离爆发时激活。此时大盘无差别抛压清空，回归估值红利期。",
-        "desc_top": "【逃顶激活：隐蔽自满✖抱团发散】当指数高位且相关性极弱（掩饰流动性干涸），但离散度暴拉金叉（极少数巨头拉盘掩护出货）时激活。此时大盘广度深度崩塌，触发终极防御。",
+        "desc_top": "【风险等级预警】象限 I（相关性升温+离散度发散）按高风险预警；象限 III（相关性退潮+离散度发散）按高风险，若指数高位或相关性极低升级为极高风险；所有高风险/极高风险均触发红色预警。",
         "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
             f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#d35400;'>{quant_data.get('combined_diag', '无信息')}</div>"
+            f"<b>🧯 风险等级：</b>{quant_data.get('corr_risk_level', '无信息')} - {quant_data.get('corr_risk_diag', '无信息')}<br>"
             f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
             f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
         ),
