@@ -40,6 +40,9 @@ st.markdown("""
     .switch-value { margin: 4px 0 4px 0; font-size: 8.7pt; line-height: 1.35; }
     .switch-status { margin: 2px 0 0 0; font-size: 8.6pt; line-height: 1.35; color: #34495e; }
     .switch-status div, .switch-status p, .switch-status span { font-size: 8.6pt !important; line-height: 1.35 !important; }
+    .switch-meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin: 6px 0; padding: 6px; background: #f8fafb; border-radius: 5px; color: #34495e; }
+    .switch-meta-grid div { font-size: 8.1pt; line-height: 1.25; }
+    .switch-strategy { margin-top: 6px; padding: 6px 7px; border-radius: 5px; background: #fffdf4; border: 1px solid #f2e7b8; color: #5d4b00; font-size: 8.3pt; line-height: 1.35; }
     .switch-footer { margin: 4px 0 10px 0; color: #7f8c8d; font-size: 8pt; line-height: 1.3; }
     .switch-boundary-panel { padding: 8px 10px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #ffffff; }
     .switch-boundary-panel p { margin: 0 0 6px 0; font-size: 8.6pt; line-height: 1.38; }
@@ -65,6 +68,86 @@ def filter_leveraged_etfs(ticker_list):
     """
     known_lev_etfs = {'TQQQ', 'SQQQ', 'UPRO', 'SPXU', 'SOXL', 'SOXS', 'FAS', 'FAZ', 'YINN', 'YANG', 'UVXY', 'VIXY', 'SPXL'}
     return [ticker for ticker in ticker_list if str(ticker).upper() not in known_lev_etfs]
+
+RISK_SCORE_MAP = {
+    "极高风险": 100,
+    "高风险": 82,
+    "中高风险": 66,
+    "中风险": 48,
+    "中性偏稳": 30,
+    "中性": 28,
+    "低风险": 18,
+    "低风险/机会": 12,
+    "数据风险": 35,
+    "数据缺失": 40,
+}
+
+OPPORTUNITY_SCORE_MAP = {
+    "强抄底": 92,
+    "抄底": 78,
+    "机会": 64,
+    "低风险/机会": 58,
+    "观察": 28,
+    "无": 0,
+}
+
+CYCLE_META = {
+    "intraday": ("盘中实时", 1.00, "对情绪拐点和风控触发最敏感，适合做当天仓位和止盈线调整。"),
+    "daily": ("日级别", 0.82, "用于确认资金结构和趋势状态，不适合被单日噪音反复打脸。"),
+    "post_close": ("盘后日更", 0.74, "适合判断底层资金方向，盘中价格冲击时需配合实时波动指标确认。"),
+    "hybrid": ("日线+盘中", 0.92, "兼顾趋势确认和实时杠杆情绪，权重保留但避免过度交易。"),
+}
+
+def level_to_score(level, score_map, default=35):
+    return score_map.get(level, default)
+
+def infer_badge_from_scores(risk_score, opportunity_score):
+    if risk_score >= 72:
+        return "风险预警"
+    if opportunity_score >= 64 and risk_score < 66:
+        return "抄底/修复"
+    return "中性观察"
+
+def build_strategy_text(risk_level, opportunity_level, cycle_key):
+    if risk_level in ("极高风险", "高风险"):
+        return "策略：降低净多头敞口，收紧止盈线；只保留强趋势或高EV仓位，禁止加杠杆。"
+    if risk_level == "中高风险":
+        return "策略：不追涨，优先做仓位体检；等实时指标确认降温后再恢复进攻。"
+    if opportunity_level in ("强抄底", "抄底"):
+        return "策略：允许分批进攻，但需要至少一个实时指标不再恶化；优先选择错杀高质量标的。"
+    if opportunity_level in ("机会", "低风险/机会"):
+        return "策略：可维持或小幅增加核心仓位，避免一次性满仓，等待更多开关共振。"
+    if cycle_key == "post_close":
+        return "策略：作为方向底稿，不单独决定盘中交易；盘中必须看 VIX/VXN 或价格行为确认。"
+    return "策略：维持中性仓位，等待风险或机会分数突破阈值后再行动。"
+
+def enrich_switch(s):
+    cycle_label, cycle_weight, cycle_note = CYCLE_META.get(s.get("cycle_key", "daily"), CYCLE_META["daily"])
+    risk_level = s.get("risk_level", "高风险" if s.get("top_active") else "中性")
+    opportunity_level = s.get("opportunity_level", "抄底" if s.get("bottom_active") else "无")
+    risk_score = s.get("risk_score", level_to_score(risk_level, RISK_SCORE_MAP))
+    opportunity_score = s.get("opportunity_score", level_to_score(opportunity_level, OPPORTUNITY_SCORE_MAP, 0))
+    effective_weight = s.get("weight", 1.0) * cycle_weight
+    net_score = (risk_score - opportunity_score) * effective_weight
+    badge_label = infer_badge_from_scores(risk_score, opportunity_score)
+    strategy = s.get("strategy", build_strategy_text(risk_level, opportunity_level, s.get("cycle_key", "daily")))
+    enriched = dict(s)
+    enriched.update({
+        "cycle_label": cycle_label,
+        "cycle_weight": cycle_weight,
+        "cycle_note": cycle_note,
+        "risk_level": risk_level,
+        "opportunity_level": opportunity_level,
+        "risk_score": risk_score,
+        "opportunity_score": opportunity_score,
+        "effective_weight": effective_weight,
+        "net_score": net_score,
+        "badge_label": badge_label,
+        "strategy": strategy,
+        "top_active": s.get("top_active", False) or risk_score >= 72,
+        "bottom_active": s.get("bottom_active", False) or (opportunity_score >= 76 and risk_score < 72),
+    })
+    return enriched
 
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
@@ -620,6 +703,91 @@ def fetch_vxn_vix_data():
     except Exception as e:
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
     return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
+
+@st.cache_data(ttl=1800)
+def fetch_macro_liquidity_overlay():
+    try:
+        tickers = ['^MOVE', '^VVIX', 'HYG', 'LQD']
+        raw = yf.download(tickers, period='6mo', progress=False)['Close'].ffill()
+        if raw.empty:
+            raise Exception("宏观补充数据为空")
+
+        available_cols = set(raw.columns)
+        risk_points = 0
+        opportunity_points = 0
+        details = []
+
+        if '^MOVE' in available_cols and raw['^MOVE'].dropna().shape[0] >= 30:
+            move = raw['^MOVE'].dropna()
+            move_z = (move.iloc[-1] - move.tail(60).mean()) / move.tail(60).std() if move.tail(60).std() > 0 else 0
+            if move_z >= 1.25:
+                risk_points += 9
+                details.append(f"MOVE债券波动Z:{move_z:.1f}，利率尾部风险抬升")
+            elif move_z <= -1.0:
+                opportunity_points += 4
+                details.append(f"MOVE债券波动Z:{move_z:.1f}，利率冲击降温")
+
+        if '^VVIX' in available_cols and raw['^VVIX'].dropna().shape[0] >= 30:
+            vvix = raw['^VVIX'].dropna()
+            vvix_z = (vvix.iloc[-1] - vvix.tail(60).mean()) / vvix.tail(60).std() if vvix.tail(60).std() > 0 else 0
+            if vvix_z >= 1.25:
+                risk_points += 8
+                details.append(f"VVIX波动尾部Z:{vvix_z:.1f}，VIX凸性保护需求升温")
+            elif vvix_z <= -1.0:
+                opportunity_points += 3
+                details.append(f"VVIX波动尾部Z:{vvix_z:.1f}，期权尾部恐慌缓和")
+
+        if {'HYG', 'LQD'}.issubset(available_cols):
+            credit_ratio = (raw['HYG'] / raw['LQD']).dropna()
+            if credit_ratio.shape[0] >= 50:
+                credit_fast = credit_ratio.ewm(span=5, adjust=False).mean()
+                credit_slow = credit_ratio.ewm(span=21, adjust=False).mean()
+                credit_z = (credit_ratio.iloc[-1] - credit_ratio.tail(60).mean()) / credit_ratio.tail(60).std() if credit_ratio.tail(60).std() > 0 else 0
+                if credit_fast.iloc[-1] < credit_slow.iloc[-1] and credit_z < -0.7:
+                    risk_points += 7
+                    details.append(f"HYG/LQD信用比率走弱Z:{credit_z:.1f}，信用风险偏好退潮")
+                elif credit_fast.iloc[-1] > credit_slow.iloc[-1] and credit_z > 0:
+                    opportunity_points += 4
+                    details.append(f"HYG/LQD信用比率修复Z:{credit_z:.1f}，信用风险偏好回暖")
+
+        net_adjustment = risk_points - opportunity_points
+        if net_adjustment >= 12:
+            status = "🚨 宏观补充雷达：外部流动性明显恶化，综合策略需额外降风险。"
+            level = "高风险"
+        elif net_adjustment >= 6:
+            status = "🟠 宏观补充雷达：债券/波动/信用有边际压力，进攻信号需要打折。"
+            level = "中高风险"
+        elif net_adjustment <= -5:
+            status = "🟢 宏观补充雷达：外部流动性压力缓和，可提升抄底信号可信度。"
+            level = "机会"
+        else:
+            status = "⚪ 宏观补充雷达：外部流动性中性，六开关主模型占主导。"
+            level = "中性"
+
+        if not details:
+            details.append("可用补充指标不足，暂不修正主模型。")
+
+        return {
+            "error": False,
+            "level": level,
+            "status": status,
+            "details": "；".join(details),
+            "risk_points": risk_points,
+            "opportunity_points": opportunity_points,
+            "net_adjustment": net_adjustment,
+            "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+    except Exception as e:
+        return {
+            "error": True,
+            "level": "数据缺失",
+            "status": "宏观补充雷达数据抓取失败",
+            "details": str(e),
+            "risk_points": 0,
+            "opportunity_points": 0,
+            "net_adjustment": 0,
+            "fetched_at": "异常断流"
+        }
     
 # -----------------------------------------------------------------------------
 # 3. 业务决策逻辑组装与元数据解析
@@ -628,6 +796,7 @@ vix_data = fetch_vix_data()
 crypto_data = fetch_crypto_signals()
 sm_data = fetch_squeezemetrics_data()
 quant_data = calculate_quant_and_breadth_signals()
+macro_data = fetch_macro_liquidity_overlay()
 
 now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 vxn_vix_data = fetch_vxn_vix_data()
@@ -682,6 +851,80 @@ def classify_sm_gex_dix_risk(gex_val, dix_val):
         "top_active": top_active,
     }
 
+def classify_vix_profile(vix_data):
+    if vix_data.get("error"):
+        return {"risk_level": "数据缺失", "opportunity_level": "无", "risk_score": 40, "opportunity_score": 0}
+    ratio = vix_data.get("ratio", 1.1)
+    vix = vix_data.get("vix", 18)
+    if vix_data.get("top_active") and (ratio >= 1.25 or vix < 13.5):
+        return {"risk_level": "极高风险", "opportunity_level": "无", "risk_score": 96, "opportunity_score": 0}
+    if vix_data.get("top_active"):
+        return {"risk_level": "高风险", "opportunity_level": "无", "risk_score": 82, "opportunity_score": 0}
+    if vix_data.get("bottom_active") and vix >= 24:
+        return {"risk_level": "中风险", "opportunity_level": "强抄底", "risk_score": 45, "opportunity_score": 90}
+    if vix_data.get("bottom_active"):
+        return {"risk_level": "中性", "opportunity_level": "抄底", "risk_score": 30, "opportunity_score": 76}
+    if ratio <= 1.0 or vix >= 24:
+        return {"risk_level": "中高风险", "opportunity_level": "观察", "risk_score": 66, "opportunity_score": 22}
+    if ratio >= 1.15 or vix < 13.5:
+        return {"risk_level": "中风险", "opportunity_level": "无", "risk_score": 50, "opportunity_score": 0}
+    return {"risk_level": "低风险", "opportunity_level": "观察", "risk_score": 20, "opportunity_score": 25}
+
+def classify_crypto_profile(crypto_data):
+    if crypto_data.get("error"):
+        return {"risk_level": "数据缺失", "opportunity_level": "无", "risk_score": 38, "opportunity_score": 0}
+    diag = crypto_data.get("diag_status", "")
+    if crypto_data.get("top_active") and "极度危险" in diag:
+        return {"risk_level": "高风险", "opportunity_level": "无", "risk_score": 84, "opportunity_score": 0}
+    if crypto_data.get("top_active"):
+        return {"risk_level": "中高风险", "opportunity_level": "无", "risk_score": 68, "opportunity_score": 0}
+    if crypto_data.get("bottom_active"):
+        return {"risk_level": "中性", "opportunity_level": "抄底", "risk_score": 32, "opportunity_score": 76}
+    if "轧空预警" in diag:
+        return {"risk_level": "中风险", "opportunity_level": "机会", "risk_score": 46, "opportunity_score": 55}
+    if "健康延续" in diag:
+        return {"risk_level": "低风险", "opportunity_level": "观察", "risk_score": 22, "opportunity_score": 34}
+    return {"risk_level": "中性", "opportunity_level": "观察", "risk_score": 32, "opportunity_score": 20}
+
+def classify_cta_profile(quant_data):
+    if quant_data.get("error"):
+        return {"risk_level": "数据缺失", "opportunity_level": "无", "risk_score": 38, "opportunity_score": 0}
+    if quant_data.get("cta_top_active"):
+        return {"risk_level": "高风险", "opportunity_level": "无", "risk_score": 78, "opportunity_score": 0}
+    if quant_data.get("cta_bottom_active"):
+        return {"risk_level": "中风险", "opportunity_level": "抄底", "risk_score": 44, "opportunity_score": 78}
+    if "分化" in quant_data.get("cta_status", ""):
+        return {"risk_level": "中风险", "opportunity_level": "观察", "risk_score": 45, "opportunity_score": 20}
+    return {"risk_level": "中性", "opportunity_level": "观察", "risk_score": 30, "opportunity_score": 25}
+
+def classify_corr_profile(quant_data):
+    if quant_data.get("error"):
+        return {"risk_level": "数据缺失", "opportunity_level": "无", "risk_score": 40, "opportunity_score": 0}
+    risk_level = quant_data.get("corr_risk_level", "中性")
+    risk_score = level_to_score(risk_level, RISK_SCORE_MAP)
+    if quant_data.get("corr_bottom_active"):
+        return {"risk_level": "中风险", "opportunity_level": "抄底", "risk_score": min(risk_score, 46), "opportunity_score": 80}
+    if risk_level in ("高风险", "极高风险"):
+        return {"risk_level": risk_level, "opportunity_level": "无", "risk_score": risk_score, "opportunity_score": 0}
+    if risk_level == "低风险":
+        return {"risk_level": "低风险", "opportunity_level": "观察", "risk_score": 18, "opportunity_score": 28}
+    return {"risk_level": risk_level, "opportunity_level": "观察", "risk_score": risk_score, "opportunity_score": 18}
+
+def classify_vxn_profile(vxn_vix_data):
+    if vxn_vix_data.get("error"):
+        return {"risk_level": "数据缺失", "opportunity_level": "无", "risk_score": 38, "opportunity_score": 0}
+    ratio = vxn_vix_data.get("current_ratio", 1.2)
+    spread = vxn_vix_data.get("current_spread", 4.0)
+    if vxn_vix_data.get("top_active") and (ratio > 1.35 or spread > 7.5):
+        return {"risk_level": "极高风险", "opportunity_level": "无", "risk_score": 92, "opportunity_score": 0}
+    if vxn_vix_data.get("top_active"):
+        return {"risk_level": "高风险", "opportunity_level": "无", "risk_score": 78, "opportunity_score": 0}
+    if vxn_vix_data.get("bottom_active"):
+        return {"risk_level": "中性", "opportunity_level": "抄底", "risk_score": 32, "opportunity_score": 78}
+    if ratio < 1.10 or spread < 3.0:
+        return {"risk_level": "中风险", "opportunity_level": "无", "risk_score": 48, "opportunity_score": 0}
+    return {"risk_level": "低风险", "opportunity_level": "观察", "risk_score": 24, "opportunity_score": 24}
+
 if not sm_data["error"]:
     gex_val = sm_data.get('gex', 0)
     dix_val = sm_data.get('dix', 44.0)
@@ -703,11 +946,27 @@ else:
     sm_top_active = False
     sm_status = "数据抓取失败 🔴"
     gex_val, dix_val = 0, 0.0
+    sm_risk = {"risk_level": "数据缺失", "opportunity_level": "无", "risk_score": 40, "opportunity_score": 0}
+
+vix_profile = classify_vix_profile(vix_data)
+crypto_profile = classify_crypto_profile(crypto_data)
+cta_profile = classify_cta_profile(quant_data)
+corr_profile = classify_corr_profile(quant_data)
+vxn_profile = classify_vxn_profile(vxn_vix_data)
 
 switches = [
     {
         "id": 1,
         "name": "做市商 Gamma & 暗池 DIX 联合资产开关",
+        "rank": 2,
+        "weight": 1.25,
+        "cycle_key": "post_close",
+        "core_position": "底层资金承接与做市商对冲方向",
+        "importance": "核心权重：能识别暗池吸筹/派发与Gamma机械对冲的共振。",
+        "risk_level": sm_risk["risk_level"],
+        "opportunity_level": "低风险/机会" if sm_bottom_active else sm_risk.get("opportunity_level", "无"),
+        "risk_score": sm_risk.get("risk_score", level_to_score(sm_risk["risk_level"], RISK_SCORE_MAP)),
+        "opportunity_score": 68 if sm_bottom_active else sm_risk.get("opportunity_score", 0),
         "bottom_active": sm_bottom_active,
         "top_active": sm_top_active,
         "value": f"GEX: {gex_val:,} | DIX: {dix_val}%",
@@ -721,6 +980,15 @@ switches = [
     {
             "id": 2,
             "name": "VIX 期限结构与趋势动能雷达",
+            "rank": 1,
+            "weight": 1.35,
+            "cycle_key": "intraday",
+            "core_position": "系统性波动压力与期限结构拐点",
+            "importance": "最高权重：期限结构破位经常领先系统性风控，盘中敏感度最高。",
+            "risk_level": vix_profile["risk_level"],
+            "opportunity_level": vix_profile["opportunity_level"],
+            "risk_score": vix_profile["risk_score"],
+            "opportunity_score": vix_profile["opportunity_score"],
             "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
             "top_active": vix_data["top_active"] if not vix_data["error"] else False,
             "value": f"今日比率: {vix_data.get('ratio', 'N/A')} | EMA5/21状态: {'快线上穿/多头' if vix_data['bottom_active'] else '死叉/发散'} | VIX现货: {vix_data.get('vix', 'N/A')}",
@@ -738,6 +1006,15 @@ switches = [
     {
         "id": 3,
         "name": "加密离岸高杠杆流动性前哨 (Price+OI+FR 矩阵)",
+        "rank": 6,
+        "weight": 0.72,
+        "cycle_key": "hybrid",
+        "core_position": "离岸杠杆情绪与风险偏好前哨",
+        "importance": "辅助权重：对高Beta风险偏好敏感，但对美股核心资金面需打折处理。",
+        "risk_level": crypto_profile["risk_level"],
+        "opportunity_level": crypto_profile["opportunity_level"],
+        "risk_score": crypto_profile["risk_score"],
+        "opportunity_score": crypto_profile["opportunity_score"],
         "bottom_active": crypto_data["bottom_active"] if not crypto_data["error"] else False,
         "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
         "value": f"BTC现货: {crypto_data.get('btc_price', 'N/A')} ({crypto_data.get('price_trend', '')}) | OI: {crypto_data.get('oi', 'N/A')} ({crypto_data.get('oi_trend', '')}) | 费率: {crypto_data.get('funding_rate', 'N/A')}",
@@ -753,6 +1030,15 @@ switches = [
     {
         "id": 4,
         "name": "CTA 动量矩阵 (系统性抛压/买盘极值监测)",
+        "rank": 5,
+        "weight": 0.88,
+        "cycle_key": "daily",
+        "core_position": "趋势基金系统性买盘/卖盘边际位置",
+        "importance": "中高权重：适合判断趋势资金是否过饱和或抛压耗尽。",
+        "risk_level": cta_profile["risk_level"],
+        "opportunity_level": cta_profile["opportunity_level"],
+        "risk_score": cta_profile["risk_score"],
+        "opportunity_score": cta_profile["opportunity_score"],
         "bottom_active": quant_data["cta_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["cta_top_active"] if not quant_data["error"] else False,
         "value": f"当前状态: {quant_data.get('cta_status', 'N/A')}",
@@ -770,6 +1056,15 @@ switches = [
     {
         "id": 5,
         "name": "全局隐含相关性拐点与离散度爆发矩阵 (全象限版)",
+        "rank": 3,
+        "weight": 1.18,
+        "cycle_key": "daily",
+        "core_position": "市场广度、抱团程度与内部结构撕裂",
+        "importance": "核心权重：能捕捉指数表面稳定但内部广度塌陷的风险。",
+        "risk_level": corr_profile["risk_level"],
+        "opportunity_level": corr_profile["opportunity_level"],
+        "risk_score": corr_profile["risk_score"],
+        "opportunity_score": corr_profile["opportunity_score"],
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
         "value": f"{quant_data.get('cboe_corr', 'N/A')} | {quant_data.get('cboe_disp', 'N/A')}",
@@ -788,6 +1083,15 @@ switches = [
     {
         "id": 6,
         "name": "VXN-VIX 科技股雷达",
+        "rank": 4,
+        "weight": 1.05,
+        "cycle_key": "intraday",
+        "core_position": "科技股相对波动溢价与纳指踩踏风险",
+        "importance": "中高权重：对纳指/AI/高Beta科技仓位的即时风控很敏感。",
+        "risk_level": vxn_profile["risk_level"],
+        "opportunity_level": vxn_profile["opportunity_level"],
+        "risk_score": vxn_profile["risk_score"],
+        "opportunity_score": vxn_profile["opportunity_score"],
         "bottom_active": vxn_vix_data["bottom_active"] if not vxn_vix_data["error"] else False,
         "top_active": vxn_vix_data["top_active"] if not vxn_vix_data["error"] else False,
         "value": f"Spread: {vxn_vix_data.get('current_spread', 'N/A')} | Ratio: {vxn_vix_data.get('current_ratio', 'N/A')} | 熔断风控实时检测",
@@ -804,34 +1108,63 @@ switches = [
     }
 ]
 
+switches = sorted([enrich_switch(s) for s in switches], key=lambda x: x["rank"])
+
 bottom_score = sum([1 for s in switches if s["bottom_active"]])
 top_score = sum([1 for s in switches if s["top_active"]])
-neutral_score = len(switches) - bottom_score - top_score 
+neutral_score = len(switches) - bottom_score - top_score
+total_effective_weight = sum([s["effective_weight"] for s in switches])
+weighted_risk_score = sum([s["risk_score"] * s["effective_weight"] for s in switches]) / total_effective_weight
+weighted_opportunity_score = sum([s["opportunity_score"] * s["effective_weight"] for s in switches]) / total_effective_weight
+macro_adjustment = macro_data.get("net_adjustment", 0)
+net_risk_score = weighted_risk_score - weighted_opportunity_score + macro_adjustment
 
-if top_score >= 3 and top_score >= bottom_score:
+high_risk_names = [f"#{s['rank']} {s['name']}({s['risk_level']})" for s in switches if s["risk_score"] >= 72]
+opportunity_names = [f"#{s['rank']} {s['name']}({s['opportunity_level']})" for s in switches if s["opportunity_score"] >= 64 and s["risk_score"] < 72]
+ranking_line = " > ".join([f"{s['rank']}.{s['name'].split(' ')[0]}(权重{s['weight']:.2f})" for s in switches])
+
+if net_risk_score >= 38 or weighted_risk_score >= 72:
     status_color = "red"
-    action_title = "🚨 【红色防御：触发系统性风控见顶逃顶线】"
+    action_title = "🚨 【红色防御：加权风险占优，进入系统性降杠杆模式】"
     action_text = (
-        f"<b>大盘底层资金面诊断</b>：当前系统 {len(switches)} 大核心开关中有 <b>{top_score}</b> 项联合拉响见顶警报，市场呈现极度贪婪或高位严重分裂！<br>"
-        "做市商Gamma敞口恶化引发追跌放大效应，配合暗池主力高位派发及多头边际买盘枯竭。此时必须<b>全面收紧个股诊断模型的止盈线</b>，"
-        "转入全面战略防御，严控多头杠杆。"
+        f"<b>加权诊断</b>：风险分 <b>{weighted_risk_score:.1f}</b> / 机会分 <b>{weighted_opportunity_score:.1f}</b> / "
+        f"宏观修正 <b>{macro_adjustment:+.1f}</b> / 净风险 <b>{net_risk_score:.1f}</b>。<br>"
+        f"<b>主导风险</b>：{'；'.join(high_risk_names[:3]) if high_risk_names else '风险来自多个中等级别开关叠加'}。<br>"
+        "策略：净多头降到防御仓位，优先处理高Beta、弱广度、弱现金流标的；新开仓只允许小仓试错，所有盈利仓提高保护性止盈。"
     )
-elif bottom_score >= 3 and bottom_score >= top_score:
+elif net_risk_score <= -22 and weighted_opportunity_score >= 56:
     status_color = "green"
-    action_title = "🚀 【绿色共振：底部恐慌宣泄枯竭，触发拐点重仓抄底】"
+    action_title = "🚀 【绿色进攻：加权机会占优，允许分批抄底/加仓】"
     action_text = (
-        f"<b>大盘底层资金面诊断</b>：当前系统 {len(switches)} 大核心开关中有 <b>{bottom_score}</b> 项指标达成共振，黄金左侧买点确立！<br>"
-        "做市商Gamma转正提供防护，暗池机构大单托底，且离岸高杠杆和系统性CTA抛压均已砸至历史冰点。多头精准抄底模式全面启动，"
-        "建议结合个股的 Expected Value 与 Random Forest 模型全力捕捉大盘错杀的EV红利股。"
+        f"<b>加权诊断</b>：风险分 <b>{weighted_risk_score:.1f}</b> / 机会分 <b>{weighted_opportunity_score:.1f}</b> / "
+        f"宏观修正 <b>{macro_adjustment:+.1f}</b> / 净风险 <b>{net_risk_score:.1f}</b>。<br>"
+        f"<b>主导机会</b>：{'；'.join(opportunity_names[:3]) if opportunity_names else '机会来自多个开关温和修复'}。<br>"
+        "策略：允许分批抄底或提高核心仓位，但仍需避开财务/趋势双弱个股；若盘中实时开关重新转红，立即暂停加仓。"
+    )
+elif net_risk_score >= 16:
+    status_color = "orange"
+    action_title = "🟠 【橙色谨慎：风险边际占优，进入轻防御与观察模式】"
+    action_text = (
+        f"<b>加权诊断</b>：风险分 <b>{weighted_risk_score:.1f}</b> / 机会分 <b>{weighted_opportunity_score:.1f}</b> / "
+        f"宏观修正 <b>{macro_adjustment:+.1f}</b> / 净风险 <b>{net_risk_score:.1f}</b>。<br>"
+        "策略：不追涨、不加杠杆，保留核心仓但减少边缘仓；等待 VIX/VXN 盘中开关或 GEX/DIX 日更确认方向。"
+    )
+elif net_risk_score <= -8:
+    status_color = "green"
+    action_title = "🟢 【绿色修复：机会边际占优，但尚未满仓共振】"
+    action_text = (
+        f"<b>加权诊断</b>：风险分 <b>{weighted_risk_score:.1f}</b> / 机会分 <b>{weighted_opportunity_score:.1f}</b> / "
+        f"宏观修正 <b>{macro_adjustment:+.1f}</b> / 净风险 <b>{net_risk_score:.1f}</b>。<br>"
+        "策略：可以小步增加高质量核心资产或做空波动后的反弹修复，但仓位节奏必须分批，等待更多日级别开关确认。"
     )
 else:
     status_color = "orange"
-    action_title = "⏳ 【黄色震荡：多空状态均衡交织，常规结构分化轮动】"
+    action_title = "⏳ 【黄色均衡：多空证据交织，执行中性仓位与分层观察】"
     action_text = (
-        f"<b>大盘底层资金面诊断</b>：当前系统无极端单边共振信号（抄底激活:<b>{bottom_score}</b> | "
-        f"见顶风控:<b>{top_score}</b> | 状态中性:<b>{neutral_score}</b>）。"
-        "全市场流动性在巨头与权重股之间常规轮动，未形成系统性突变尾部风险。建议维持常态化均衡仓位，实施中性对冲策略，"
-        "持续对目标个股执行日线级别常规诊断。"
+        f"<b>加权诊断</b>：风险分 <b>{weighted_risk_score:.1f}</b> / 机会分 <b>{weighted_opportunity_score:.1f}</b> / "
+        f"宏观修正 <b>{macro_adjustment:+.1f}</b> / 净风险 <b>{net_risk_score:.1f}</b>。<br>"
+        f"当前红灯:<b>{top_score}</b> / 绿灯:<b>{bottom_score}</b> / 中性:<b>{neutral_score}</b>。"
+        "策略：维持均衡仓位，重点跟踪排名靠前的 VIX期限、GEX/DIX、相关性离散度三大核心开关。"
     )
 
 # -----------------------------------------------------------------------------
@@ -844,6 +1177,10 @@ st.markdown(f"""
 <div style="padding:15px; border-radius:8px; border-left: 6px solid {status_color}; background-color:#fafafa; margin-bottom:20px;">
     <h4 style="color:{status_color}; margin:0 0 10px 0;">{action_title}</h4>
     <p style="font-size:11pt; line-height:1.6; color:#333;">{action_text}</p>
+    <p style="font-size:9pt; line-height:1.45; color:#555; margin:8px 0 0 0;">
+        <b>重要性排序:</b> {ranking_line}<br>
+        <b>宏观补充:</b> {macro_data.get('status', '无信息')} {macro_data.get('details', '')}
+    </p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -854,13 +1191,13 @@ for i, s in enumerate(switches):
     with cols[i % 3]:
         if s["top_active"]:
             box_class = "status-top-active"
-            badge_html = f"<span class='badge-top'>🚨 风险预警</span>"
+            badge_html = f"<span class='badge-top'>🚨 {s['badge_label']}</span>"
         elif s["bottom_active"]:
             box_class = "status-bottom-active"
-            badge_html = f"<span class='badge-bottom'>🟢 信号激活</span>"
+            badge_html = f"<span class='badge-bottom'>🟢 {s['badge_label']}</span>"
         else:
             box_class = "status-neutral"
-            badge_html = f"<span class='badge-info'>⚪ 状态中性</span>"
+            badge_html = f"<span class='badge-info'>⚪ {s['badge_label']}</span>"
         
         metadata_line = f'<div style="margin-top: 10px; padding-top: 6px; border-top: 1px dashed #e0e0e0; font-size: 8pt; color: #7f8c8d;"><span style="float: left;">⏱️ {s.get("update_cycle", "未知")}</span><span style="float: right; font-family: monospace;">📅 {s.get("last_updated", "实时")}</span><div style="clear: both;"></div></div>'
         
@@ -875,8 +1212,16 @@ for i, s in enumerate(switches):
                 {badge_html}
             </div>
             <hr style="margin: 8px 0; border: 0; border-top: 1px solid #eee;">
-            <p class="switch-value"><b>核心底层定位:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
+            <p class="switch-value"><b>核心定位:</b> <span style="color:#2c3e50; font-weight:bold;">{s['core_position']}</span></p>
+            <p class="switch-value"><b>当前数值:</b> <span style="font-family: monospace; color:#2980b9; font-weight:bold;">{s['value']}</span></p>
+            <div class="switch-meta-grid">
+                <div><b>风险等级:</b> {s['risk_level']} ({s['risk_score']})</div>
+                <div><b>机会等级:</b> {s['opportunity_level']} ({s['opportunity_score']})</div>
+                <div><b>重要性:</b> #{s['rank']} / 权重 {s['weight']:.2f}</div>
+                <div><b>周期:</b> {s['cycle_label']} / 影响 {s['cycle_weight']:.2f}</div>
+            </div>
             <div class="switch-status"><b>📡 数据状态:</b> <span>{s['fetched_status']}</span></div>
+            <div class="switch-strategy"><b>策略动作:</b> {s['strategy']}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -885,6 +1230,8 @@ for i, s in enumerate(switches):
             <div class="switch-boundary-panel">
                 <p><b>📈 多头见底边界:</b> <span style="color:#27ae60;">{safe_desc_bottom}</span></p>
                 <p><b>📉 空头防守边界:</b> <span style="color:#c0392b;">{safe_desc_top}</span></p>
+                <p><b>⚖️ 重要性说明:</b> {s['importance']}</p>
+                <p><b>⏱️ 周期影响:</b> {s['cycle_note']}</p>
             </div>
             """, unsafe_allow_html=True)
 
