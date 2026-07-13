@@ -788,6 +788,138 @@ def fetch_macro_liquidity_overlay():
             "net_adjustment": 0,
             "fetched_at": "异常断流"
         }
+
+NASDAQ_PE_BANDS = {
+    "opportunity": 26.0,
+    "neutral_high": 34.0,
+    "warning": 40.0,
+}
+
+def safe_float(value):
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+def classify_nasdaq_pe_valuation(current_pe):
+    if current_pe >= NASDAQ_PE_BANDS["warning"]:
+        return {
+            "zone": "红色预警区",
+            "color": "#c0392b",
+            "risk_level": "极高估值风险",
+            "action": "估值扩张已经进入极端拥挤区，优先降杠杆、收紧科技股止盈线，新增仓位只做回调后的确认。",
+        }
+    if current_pe >= NASDAQ_PE_BANDS["neutral_high"]:
+        return {
+            "zone": "估值预警区",
+            "color": "#e67e22",
+            "risk_level": "高估值风险",
+            "action": "估值处于偏贵区间，保留核心仓但不追高，等待盈利上修或价格回调消化 PE。",
+        }
+    if current_pe <= NASDAQ_PE_BANDS["opportunity"]:
+        return {
+            "zone": "机会区",
+            "color": "#27ae60",
+            "risk_level": "低估值/机会",
+            "action": "估值回落到赔率友好区，可分批跟踪高质量科技资产，但仍需等待资金面开关配合。",
+        }
+    return {
+        "zone": "中性区",
+        "color": "#2980b9",
+        "risk_level": "中性估值",
+        "action": "估值不便宜也未失控，仓位主要交给趋势、波动率和资金流信号决定。",
+    }
+
+@st.cache_data(ttl=21600)
+def fetch_nasdaq_pe_valuation():
+    """
+    使用 ^NDX 优先、QQQ 代理兜底的方式抓取 PE。
+    若 yfinance 只给到当前 PE，则用当前隐含 EPS 将价格历史转换成估值温度线。
+    """
+    candidates = [
+        ("^NDX", "Nasdaq 100 指数 (^NDX)"),
+        ("QQQ", "Invesco QQQ ETF 代理"),
+    ]
+    errors = []
+
+    for ticker_symbol, source_name in candidates:
+        try:
+            ticker = yf.Ticker(ticker_symbol)
+            hist = ticker.history(period="2y")
+            if hist.empty or "Close" not in hist.columns:
+                errors.append(f"{ticker_symbol}: 价格历史为空")
+                continue
+
+            close = hist["Close"].dropna()
+            if close.empty:
+                errors.append(f"{ticker_symbol}: 收盘价为空")
+                continue
+
+            info = {}
+            try:
+                info = ticker.get_info() or {}
+            except Exception as info_error:
+                errors.append(f"{ticker_symbol}: get_info失败({info_error})")
+                try:
+                    info = ticker.info or {}
+                except Exception as fallback_error:
+                    errors.append(f"{ticker_symbol}: info失败({fallback_error})")
+
+            current_pe = safe_float(info.get("trailingPE"))
+            pe_kind = "TTM PE"
+            if current_pe is None or current_pe <= 0:
+                current_pe = safe_float(info.get("forwardPE"))
+                pe_kind = "Forward PE"
+
+            if current_pe is None or current_pe <= 0:
+                errors.append(f"{ticker_symbol}: PE字段缺失")
+                continue
+
+            latest_price = float(close.iloc[-1])
+            if latest_price <= 0:
+                errors.append(f"{ticker_symbol}: 最新价格无效")
+                continue
+
+            implied_eps = latest_price / current_pe
+            pe_series = (close / implied_eps).replace([np.inf, -np.inf], np.nan).dropna()
+            if pe_series.shape[0] < 30:
+                errors.append(f"{ticker_symbol}: PE序列样本不足")
+                continue
+
+            pe_df = pd.DataFrame({"PE": pe_series})
+            pe_df["PE_MA63"] = pe_df["PE"].rolling(63, min_periods=10).mean()
+            pe_df["PE_MA126"] = pe_df["PE"].rolling(126, min_periods=20).mean()
+
+            latest_pe = float(pe_df["PE"].iloc[-1])
+            pe_class = classify_nasdaq_pe_valuation(latest_pe)
+            one_month_ago = pe_df["PE"].iloc[-22] if pe_df.shape[0] >= 22 else pe_df["PE"].iloc[0]
+            pe_delta_1m = latest_pe - float(one_month_ago)
+
+            return {
+                "error": False,
+                "ticker": ticker_symbol,
+                "source": source_name,
+                "pe_kind": pe_kind,
+                "current_pe": round(latest_pe, 2),
+                "pe_delta_1m": round(pe_delta_1m, 2),
+                "zone": pe_class["zone"],
+                "color": pe_class["color"],
+                "risk_level": pe_class["risk_level"],
+                "action": pe_class["action"],
+                "df": pe_df.tail(252),
+                "basis_note": f"{source_name} 当前 {pe_kind} 反推隐含 EPS，并映射近一年价格历史形成估值温度线。",
+                "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+        except Exception as e:
+            errors.append(f"{ticker_symbol}: {e}")
+
+    return {
+        "error": True,
+        "msg": "；".join(errors[-6:]) if errors else "未能获取纳斯达克 PE 数据",
+        "fetched_at": "异常断流",
+    }
     
 # -----------------------------------------------------------------------------
 # 3. 业务决策逻辑组装与元数据解析
@@ -797,6 +929,7 @@ crypto_data = fetch_crypto_signals()
 sm_data = fetch_squeezemetrics_data()
 quant_data = calculate_quant_and_breadth_signals()
 macro_data = fetch_macro_liquidity_overlay()
+nasdaq_pe_data = fetch_nasdaq_pe_valuation()
 
 now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 vxn_vix_data = fetch_vxn_vix_data()
@@ -1290,10 +1423,83 @@ if not ndx_data.empty:
         yaxis=dict(title="NDX Index Points", range=[y_range_min, y_range_max], autorange=False, tickformat=",.0f"),
         xaxis_rangeslider_visible=False, height=500, margin=dict(l=20, r=20, t=40, b=20)
     )
-    st.plotly_chart(fig_ndx, use_container_width=True)
+    st.plotly_chart(fig_ndx, width="stretch")
 
 # -----------------------------------------------------------------------------
-# 6. 近期日线级别定量监控图表选项卡
+# 6. 纳斯达克整体 PE 估值温度计
+# -----------------------------------------------------------------------------
+st.markdown("### 📊 纳斯达克整体 PE 估值温度计")
+
+if not nasdaq_pe_data.get("error", True):
+    pe_col1, pe_col2, pe_col3, pe_col4 = st.columns(4)
+    pe_col1.metric("当前估值", f"{nasdaq_pe_data['current_pe']:.2f}x", f"{nasdaq_pe_data['pe_delta_1m']:+.2f}x / 约1月")
+    pe_col2.metric("估值区间", nasdaq_pe_data["zone"])
+    pe_col3.metric("风险等级", nasdaq_pe_data["risk_level"])
+    pe_col4.metric("数据基准", nasdaq_pe_data["pe_kind"])
+
+    st.markdown(f"""
+    <div style="padding:12px 14px; border-radius:8px; border-left: 6px solid {nasdaq_pe_data['color']}; background-color:#fafafa; margin:8px 0 12px 0;">
+        <p style="margin:0; font-size:10.5pt; line-height:1.55; color:#2c3e50;">
+            <b>估值动作:</b> {nasdaq_pe_data['action']}<br>
+            <b>区间锚点:</b> 机会区 ≤ {NASDAQ_PE_BANDS['opportunity']:.0f}x；中性区 {NASDAQ_PE_BANDS['opportunity']:.0f}x - {NASDAQ_PE_BANDS['neutral_high']:.0f}x；预警区 ≥ {NASDAQ_PE_BANDS['neutral_high']:.0f}x；红色预警 ≥ {NASDAQ_PE_BANDS['warning']:.0f}x。<br>
+            <b>数据说明:</b> {nasdaq_pe_data['basis_note']} 抓取时间：{nasdaq_pe_data['fetched_at']}。
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    pe_df = nasdaq_pe_data["df"]
+    pe_y_min = max(0, min(20.0, float(pe_df["PE"].min()) * 0.92))
+    pe_y_max = max(NASDAQ_PE_BANDS["warning"] * 1.08, float(pe_df["PE"].max()) * 1.08)
+
+    fig_pe = go.Figure()
+    fig_pe.add_hrect(
+        y0=pe_y_min, y1=NASDAQ_PE_BANDS["opportunity"], line_width=0, fillcolor="#2ecc71", opacity=0.10,
+        annotation_text="机会区", annotation_position="inside top left"
+    )
+    fig_pe.add_hrect(
+        y0=NASDAQ_PE_BANDS["opportunity"], y1=NASDAQ_PE_BANDS["neutral_high"], line_width=0, fillcolor="#3498db", opacity=0.08,
+        annotation_text="中性区", annotation_position="inside top left"
+    )
+    fig_pe.add_hrect(
+        y0=NASDAQ_PE_BANDS["neutral_high"], y1=NASDAQ_PE_BANDS["warning"], line_width=0, fillcolor="#f39c12", opacity=0.12,
+        annotation_text="预警区", annotation_position="inside top left"
+    )
+    fig_pe.add_hrect(
+        y0=NASDAQ_PE_BANDS["warning"], y1=pe_y_max, line_width=0, fillcolor="#e74c3c", opacity=0.10,
+        annotation_text="红色预警", annotation_position="inside top left"
+    )
+    fig_pe.add_trace(go.Scatter(
+        x=pe_df.index, y=pe_df["PE"], mode="lines", name="纳斯达克 PE 温度线",
+        line=dict(color="#2c3e50", width=2.5)
+    ))
+    fig_pe.add_trace(go.Scatter(
+        x=pe_df.index, y=pe_df["PE_MA63"], mode="lines", name="PE 63日均线",
+        line=dict(color="#2980b9", width=1.8, dash="dot")
+    ))
+    fig_pe.add_trace(go.Scatter(
+        x=pe_df.index, y=pe_df["PE_MA126"], mode="lines", name="PE 126日均线",
+        line=dict(color="#8e44ad", width=1.8, dash="dash")
+    ))
+    fig_pe.add_hline(
+        y=nasdaq_pe_data["current_pe"], line_dash="solid", line_color=nasdaq_pe_data["color"],
+        annotation_text=f"当前 {nasdaq_pe_data['current_pe']:.2f}x", annotation_position="top right"
+    )
+    fig_pe.update_layout(
+        title=f"纳斯达克整体 PE 估值区间雷达 ({nasdaq_pe_data['source']})",
+        template="plotly_white",
+        yaxis=dict(title="PE Multiple", range=[pe_y_min, pe_y_max], tickformat=".1f"),
+        xaxis_rangeslider_visible=False,
+        height=430,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=55, b=20)
+    )
+    st.plotly_chart(fig_pe, width="stretch")
+else:
+    st.warning(f"⚠️ 纳斯达克 PE 估值模块暂未取得可用数据：{nasdaq_pe_data.get('msg', '未知异常')}")
+
+# -----------------------------------------------------------------------------
+# 7. 近期日线级别定量监控图表选项卡
 # -----------------------------------------------------------------------------
 st.markdown("---")
 st.markdown("### 📡 资金波段逻辑追踪：近期日线级别定量监控图表")
@@ -1330,7 +1536,7 @@ with tab1:
         fig_sm.update_layout(title_text="DIX 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
         fig_sm.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
         fig_sm.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
-        st.plotly_chart(fig_sm, use_container_width=True)
+        st.plotly_chart(fig_sm, width="stretch")
     else:
         st.warning("数据不可用。")
 
@@ -1344,7 +1550,7 @@ with tab2:
             fig_vix_spot.add_trace(go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2)))
             fig_vix_spot.add_hline(y=12.0, line_dash="dash", line_color="#c0392b", annotation_text="自满安全线 (12.0)")
             fig_vix_spot.update_layout(title_text="图表 A: VIX 现货恐慌指数趋势", template="plotly_white", height=400)
-            st.plotly_chart(fig_vix_spot, use_container_width=True)
+            st.plotly_chart(fig_vix_spot, width="stretch")
         with v_col2:
             fig_vix_ratio = go.Figure()
             
@@ -1384,7 +1590,7 @@ with tab2:
                 height=400,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
-            st.plotly_chart(fig_vix_ratio, use_container_width=True)
+            st.plotly_chart(fig_vix_ratio, width="stretch")
 
 # --- TAB 3 ---
 with tab3:
@@ -1430,7 +1636,7 @@ with tab3:
         fig_crypto.update_yaxes(title_text="<b>合约持仓量 (BTC)</b>", secondary_y=False)
         fig_crypto.update_yaxes(title_text="<b>日均资金费率 (%)</b>", secondary_y=True)
         
-        st.plotly_chart(fig_crypto, use_container_width=True)
+        st.plotly_chart(fig_crypto, width="stretch")
     else:
         # 把底层抓取的异常信息暴露在 Tab 面板里
         st.warning(f"⚠️ 离岸高杠杆图表渲染终止。底层数据异常：{crypto_data.get('msg', '未知环境异常')}")
@@ -1444,7 +1650,7 @@ with tab4:
         fig_cta.add_trace(go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头得分", line=dict(color="#2ecc71", width=2.5)))
         fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极值激活线 (2)")
         fig_cta.update_layout(title_text="CTA 量化追踪：多/空头趋势耗尽历史得分", template="plotly_white", height=400)
-        st.plotly_chart(fig_cta, use_container_width=True)
+        st.plotly_chart(fig_cta, width="stretch")
 
 # --- TAB 5 ---
 with tab5:
@@ -1458,7 +1664,7 @@ with tab5:
             fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_fast'], name="EMA5 (快线)", line=dict(color="#e74c3c", width=2)))
             fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_slow'], name="EMA21 (慢线)", line=dict(color="#2c3e50", width=2)))
             fig_corr.update_layout(title_text="CBOE COR1M 相关性快慢线 (死叉形成释放见底信号)", template="plotly_white", height=380)
-            st.plotly_chart(fig_corr, use_container_width=True)
+            st.plotly_chart(fig_corr, width="stretch")
             
         with c6_col2:
             fig_disp = go.Figure()
@@ -1466,7 +1672,7 @@ with tab5:
             fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_fast'], name="EMA5 (快线)", line=dict(color="#2ecc71", width=2)))
             fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_slow'], name="EMA21 (慢线)", line=dict(color="#34495e", width=2)))
             fig_disp.update_layout(title_text="CBOE DSPX 离散度快慢线 (高位金叉发散警惕拉巨头出货)", template="plotly_white", height=380)
-            st.plotly_chart(fig_disp, use_container_width=True)
+            st.plotly_chart(fig_disp, width="stretch")
 
 # --- TAB 6 ---
 with tab6:
@@ -1484,7 +1690,7 @@ with tab6:
                 template="plotly_white", 
                 height=380
             )
-            st.plotly_chart(fig_vx_spread, use_container_width=True)
+            st.plotly_chart(fig_vx_spread, width="stretch")
             
         with c7_col2:
             fig_vx_ratio = go.Figure()
@@ -1496,6 +1702,6 @@ with tab6:
                 template="plotly_white", 
                 height=380
             )
-            st.plotly_chart(fig_vx_ratio, use_container_width=True)
+            st.plotly_chart(fig_vx_ratio, width="stretch")
     else:
         st.warning("⚠️ VXN-VIX 科技前哨模块数据未激活或加载失败。")
