@@ -69,6 +69,57 @@ def filter_leveraged_etfs(ticker_list):
     known_lev_etfs = {'TQQQ', 'SQQQ', 'UPRO', 'SPXU', 'SOXL', 'SOXS', 'FAS', 'FAZ', 'YINN', 'YANG', 'UVXY', 'VIXY', 'SPXL'}
     return [ticker for ticker in ticker_list if str(ticker).upper() not in known_lev_etfs]
 
+def yf_download_safe(tickers, period, **kwargs):
+    """
+    Streamlit Cloud 上 yfinance 多线程/quoteSummary 偶尔会触发 native 层崩溃。
+    所有行情下载统一关闭 threads，并关闭进度条，减少容器环境下的 segfault 风险。
+    """
+    params = {
+        "period": period,
+        "progress": False,
+        "threads": False,
+        "auto_adjust": False,
+    }
+    params.update(kwargs)
+    return yf.download(tickers, **params)
+
+def fetch_yf_ohlc(ticker, period):
+    raw = yf_download_safe(ticker, period=period)
+    if raw.empty:
+        return pd.DataFrame()
+    if isinstance(raw.columns, pd.MultiIndex):
+        if ticker in raw.columns.get_level_values(-1):
+            raw = raw.xs(ticker, axis=1, level=-1)
+        elif ticker in raw.columns.get_level_values(0):
+            raw = raw.xs(ticker, axis=1, level=0)
+    return raw.ffill()
+
+def fetch_yf_close(tickers, period):
+    raw = yf_download_safe(tickers, period=period)
+    if raw.empty:
+        return pd.DataFrame()
+
+    if isinstance(tickers, str):
+        ticker_names = [tickers]
+    else:
+        ticker_names = list(tickers)
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        if "Close" in raw.columns.get_level_values(0):
+            close = raw["Close"]
+        elif "Close" in raw.columns.get_level_values(-1):
+            close = raw.xs("Close", axis=1, level=-1)
+        else:
+            return pd.DataFrame()
+    else:
+        if "Close" not in raw.columns:
+            return pd.DataFrame()
+        close = raw["Close"]
+
+    if isinstance(close, pd.Series):
+        close = close.to_frame(name=ticker_names[0])
+    return close.ffill()
+
 RISK_SCORE_MAP = {
     "极高风险": 100,
     "高风险": 82,
@@ -152,10 +203,9 @@ def enrich_switch(s):
 @st.cache_data(ttl=3600)
 def fetch_vix_data():
     try:
-        tickers = yf.Tickers('^VIX ^VIX3M')
-        hist = tickers.history(period='3mo')  
-        if not hist.empty and 'Close' in hist.columns:
-            close_data = hist['Close'].ffill().copy()
+        close_data = fetch_yf_close(['^VIX', '^VIX3M'], period='3mo')
+        if not close_data.empty and {'^VIX', '^VIX3M'}.issubset(close_data.columns):
+            close_data = close_data.ffill().copy()
             close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
             
             # 【新增】引入微观快线(EMA5)与趋势慢线(EMA21)作为期限结构比率的动能依据
@@ -271,7 +321,7 @@ def fetch_vix_data():
 def fetch_crypto_signals():
     try:
         # 1. 价格数据：使用 yfinance 提取日线 (规避网络拦截，极度稳定)
-        btc_df = yf.Ticker('BTC-USD').history(period='45d')
+        btc_df = fetch_yf_ohlc('BTC-USD', period='45d')
         if btc_df.empty:
             raise Exception("YF 价格数据下载为空")
         df_price = btc_df[['Close']].copy()
@@ -459,7 +509,7 @@ def calculate_quant_and_breadth_signals():
         raw_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
         yf_tickers = filter_leveraged_etfs(raw_tickers)
         
-        yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
+        yf_data = fetch_yf_close(yf_tickers, period='1y')
         yf_data = yf_data.ffill()
         latest = yf_data.iloc[-1]
         
@@ -627,11 +677,10 @@ def calculate_quant_and_breadth_signals():
 @st.cache_data(ttl=3600)
 def fetch_vxn_vix_data():
     try:
-        tickers = yf.Tickers('^VXN ^VIX')
-        hist = tickers.history(period='3mo')
+        df = fetch_yf_close(['^VXN', '^VIX'], period='3mo')
         
-        if not hist.empty and 'Close' in hist.columns:
-            df = hist['Close'].ffill().copy()
+        if not df.empty and {'^VXN', '^VIX'}.issubset(df.columns):
+            df = df.ffill().copy()
             
             df['Spread'] = df['^VXN'] - df['^VIX']
             df['Ratio'] = df['^VXN'] / df['^VIX']
@@ -708,7 +757,7 @@ def fetch_vxn_vix_data():
 def fetch_macro_liquidity_overlay():
     try:
         tickers = ['^MOVE', '^VVIX', 'HYG', 'LQD']
-        raw = yf.download(tickers, period='6mo', progress=False)['Close'].ffill()
+        raw = fetch_yf_close(tickers, period='6mo').ffill()
         if raw.empty:
             raise Exception("宏观补充数据为空")
 
@@ -803,6 +852,29 @@ def safe_float(value):
     except Exception:
         return None
 
+def fetch_yahoo_quote_pe(ticker_symbol):
+    try:
+        encoded_symbol = requests.utils.quote(ticker_symbol, safe="")
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={encoded_symbol}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        response = requests.get(url, headers=headers, timeout=8)
+        response.raise_for_status()
+        results = response.json().get("quoteResponse", {}).get("result", [])
+        if not results:
+            return None, None, None, "quote结果为空"
+
+        quote = results[0]
+        current_pe = safe_float(quote.get("trailingPE"))
+        pe_kind = "TTM PE"
+        if current_pe is None or current_pe <= 0:
+            current_pe = safe_float(quote.get("forwardPE"))
+            pe_kind = "Forward PE"
+
+        market_price = safe_float(quote.get("regularMarketPrice"))
+        return current_pe, pe_kind, market_price, ""
+    except Exception as e:
+        return None, None, None, str(e)
+
 def classify_nasdaq_pe_valuation(current_pe):
     if current_pe >= NASDAQ_PE_BANDS["warning"]:
         return {
@@ -846,8 +918,7 @@ def fetch_nasdaq_pe_valuation():
 
     for ticker_symbol, source_name in candidates:
         try:
-            ticker = yf.Ticker(ticker_symbol)
-            hist = ticker.history(period="2y")
+            hist = fetch_yf_ohlc(ticker_symbol, period="2y")
             if hist.empty or "Close" not in hist.columns:
                 errors.append(f"{ticker_symbol}: 价格历史为空")
                 continue
@@ -857,27 +928,13 @@ def fetch_nasdaq_pe_valuation():
                 errors.append(f"{ticker_symbol}: 收盘价为空")
                 continue
 
-            info = {}
-            try:
-                info = ticker.get_info() or {}
-            except Exception as info_error:
-                errors.append(f"{ticker_symbol}: get_info失败({info_error})")
-                try:
-                    info = ticker.info or {}
-                except Exception as fallback_error:
-                    errors.append(f"{ticker_symbol}: info失败({fallback_error})")
-
-            current_pe = safe_float(info.get("trailingPE"))
-            pe_kind = "TTM PE"
-            if current_pe is None or current_pe <= 0:
-                current_pe = safe_float(info.get("forwardPE"))
-                pe_kind = "Forward PE"
+            current_pe, pe_kind, market_price, pe_error = fetch_yahoo_quote_pe(ticker_symbol)
 
             if current_pe is None or current_pe <= 0:
-                errors.append(f"{ticker_symbol}: PE字段缺失")
+                errors.append(f"{ticker_symbol}: PE字段缺失({pe_error})")
                 continue
 
-            latest_price = float(close.iloc[-1])
+            latest_price = market_price if market_price and market_price > 0 else float(close.iloc[-1])
             if latest_price <= 0:
                 errors.append(f"{ticker_symbol}: 最新价格无效")
                 continue
@@ -1382,7 +1439,7 @@ st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
 
 @st.cache_data(ttl=1800)
 def fetch_ndx_chart_data():
-    df = yf.Ticker('^NDX').history(period='3mo')
+    df = fetch_yf_ohlc('^NDX', period='3mo')
     return df
 
 ndx_data = fetch_ndx_chart_data()
