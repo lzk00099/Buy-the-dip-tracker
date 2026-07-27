@@ -4,8 +4,11 @@ import numpy as np
 import yfinance as yf
 import requests
 import datetime
+import io
 import os
+import tempfile
 import time
+from urllib.parse import quote
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -68,6 +71,310 @@ def filter_leveraged_etfs(ticker_list):
     """
     known_lev_etfs = {'TQQQ', 'SQQQ', 'UPRO', 'SPXU', 'SOXL', 'SOXS', 'FAS', 'FAZ', 'YINN', 'YANG', 'UVXY', 'VIXY', 'SPXL'}
     return [ticker for ticker in ticker_list if str(ticker).upper() not in known_lev_etfs]
+
+# Yahoo 对共享云 IP 的限流会影响同一次 Streamlit 重跑中的所有 yf 调用。
+# 将仍需 Yahoo 的品种收口到一个串行批次；波动率指数与 BTC 在下方改走官方源。
+YAHOO_CORE_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD', '^MOVE', '^NDX']
+YAHOO_REQUIRED_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP']
+MARKET_CACHE_DIR = os.path.join(tempfile.gettempdir(), "sentinel2_market_cache")
+YAHOO_ATTEMPTED_THIS_RUN = False
+YAHOO_LAST_ERROR = ""
+
+def _market_cache_path(name):
+    os.makedirs(MARKET_CACHE_DIR, exist_ok=True)
+    return os.path.join(MARKET_CACHE_DIR, name)
+
+def _read_frame_cache(name, max_age_days=10):
+    path = _market_cache_path(name)
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    age_seconds = time.time() - os.path.getmtime(path)
+    if age_seconds > max_age_days * 86400:
+        return pd.DataFrame()
+    try:
+        cached = pd.read_csv(path, index_col=0, parse_dates=True)
+        cached.index = pd.to_datetime(cached.index, errors='coerce')
+        cached = cached.loc[~cached.index.isna()].sort_index()
+        cached.attrs["data_source"] = "last_success_cache"
+        cached.attrs["cache_age_hours"] = round(age_seconds / 3600, 1)
+        return cached
+    except Exception:
+        return pd.DataFrame()
+
+def _write_frame_cache(frame, name):
+    if frame is None or frame.empty:
+        return
+    path = _market_cache_path(name)
+    temp_path = path + ".tmp"
+    frame.to_csv(temp_path)
+    os.replace(temp_path, path)
+
+def _extract_yahoo_close(raw, requested_tickers):
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        level_0 = raw.columns.get_level_values(0)
+        level_1 = raw.columns.get_level_values(1)
+        if 'Close' in level_0:
+            close = raw['Close'].copy()
+        elif 'Close' in level_1:
+            close = raw.xs('Close', axis=1, level=1).copy()
+        else:
+            return pd.DataFrame()
+    elif 'Close' in raw.columns and len(requested_tickers) == 1:
+        close = raw[['Close']].rename(columns={'Close': requested_tickers[0]})
+    else:
+        return pd.DataFrame()
+
+    if isinstance(close, pd.Series):
+        close = close.to_frame(name=requested_tickers[0])
+    close.columns = [str(col).upper() for col in close.columns]
+    close.index = (
+        pd.to_datetime(close.index, errors='coerce', utc=True)
+        .tz_convert(None)
+        .normalize()
+    )
+    close = close.loc[~close.index.isna()]
+    close = close[~close.index.duplicated(keep='last')].sort_index()
+    return close.apply(pd.to_numeric, errors='coerce').dropna(how='all')
+
+def _download_yahoo_chart_symbol(symbol):
+    encoded_symbol = quote(symbol, safe='')
+    params = {"range": "1y", "interval": "1d", "events": "history"}
+    last_error = None
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            response = requests.get(
+                f"https://{host}/v8/finance/chart/{encoded_symbol}",
+                params=params,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=8
+            )
+            if response.status_code == 429:
+                raise RuntimeError("Yahoo HTTP 429")
+            response.raise_for_status()
+            result = response.json().get("chart", {}).get("result")
+            if not result:
+                raise RuntimeError("Yahoo chart 返回为空")
+            result = result[0]
+            timestamps = result.get("timestamp") or []
+            quotes = result.get("indicators", {}).get("quote") or []
+            closes = quotes[0].get("close") if quotes else []
+            if not timestamps or not closes:
+                raise RuntimeError("Yahoo chart 缺少日期或收盘价")
+            series = pd.Series(
+                closes,
+                index=(
+                    pd.to_datetime(timestamps, unit='s', utc=True)
+                    .tz_convert(None)
+                    .normalize()
+                ),
+                name=symbol
+            )
+            return pd.to_numeric(series, errors='coerce').dropna()
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"{symbol} 直接行情失败: {last_error}")
+
+def _download_nasdaq_history_symbol(symbol):
+    """
+    NASDAQ 官方历史行情作为非 Yahoo 冷启动降级源。
+    支持本应用所需 ETF 以及 NDX；MOVE 不在该接口的代码表中。
+    """
+    if symbol == '^NDX':
+        api_symbol, asset_class = 'NDX', 'index'
+    elif symbol in {'QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD'}:
+        api_symbol, asset_class = symbol, 'etf'
+    else:
+        raise RuntimeError(f"NASDAQ 降级源不支持 {symbol}")
+
+    today = datetime.date.today()
+    params = {
+        "assetclass": asset_class,
+        "fromdate": (today - datetime.timedelta(days=370)).isoformat(),
+        "todate": today.isoformat(),
+        "limit": "5000"
+    }
+    response = requests.get(
+        f"https://api.nasdaq.com/api/quote/{quote(api_symbol, safe='')}/historical",
+        params=params,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.nasdaq.com",
+            "Referer": "https://www.nasdaq.com/"
+        },
+        timeout=12
+    )
+    if response.status_code == 429:
+        raise RuntimeError("NASDAQ HTTP 429")
+    response.raise_for_status()
+    rows = (
+        response.json().get("data", {})
+        .get("tradesTable", {})
+        .get("rows")
+    )
+    if not rows:
+        raise RuntimeError(f"NASDAQ {symbol} 历史行情为空")
+
+    frame = pd.DataFrame(rows)
+    if 'date' not in frame.columns or 'close' not in frame.columns:
+        raise RuntimeError(f"NASDAQ {symbol} 返回列结构变化")
+    values = pd.to_numeric(
+        frame['close'].astype(str).str.replace(r'[$,]', '', regex=True),
+        errors='coerce'
+    )
+    series = pd.Series(
+        values.values,
+        index=pd.to_datetime(frame['date'], errors='coerce'),
+        name=symbol
+    )
+    series = series.loc[~series.index.isna()].dropna().sort_index()
+    if series.shape[0] < 126:
+        raise RuntimeError(f"NASDAQ {symbol} 有效样本不足")
+    return series
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_yahoo_core_close():
+    """
+    仅保留一个 Yahoo 批次，并关闭 yfinance 多线程，避免冷启动时请求风暴。
+    yfinance 失败时依次尝试 NASDAQ 官方历史行情与 Yahoo chart 端点；
+    仍失败则读取最近成功缓存。
+    此函数抛出的异常不会被 st.cache_data 缓存。
+    """
+    global YAHOO_ATTEMPTED_THIS_RUN, YAHOO_LAST_ERROR
+    if YAHOO_ATTEMPTED_THIS_RUN:
+        raise RuntimeError(
+            YAHOO_LAST_ERROR or "本轮页面渲染已尝试 Yahoo，停止重复请求。"
+        )
+    YAHOO_ATTEMPTED_THIS_RUN = True
+
+    errors = []
+    close = pd.DataFrame()
+    cached = _read_frame_cache("yahoo_core_close.csv")
+    cached_has_required = all(
+        symbol in cached.columns and cached[symbol].dropna().shape[0] >= 126
+        for symbol in YAHOO_REQUIRED_TICKERS
+    )
+
+    try:
+        raw = yf.download(
+            YAHOO_CORE_TICKERS,
+            period='1y',
+            interval='1d',
+            auto_adjust=False,
+            actions=False,
+            progress=False,
+            threads=False,
+            timeout=10,
+            group_by='column'
+        )
+        close = _extract_yahoo_close(raw, YAHOO_CORE_TICKERS)
+    except Exception as exc:
+        errors.append(f"yfinance: {exc}")
+
+    missing = [
+        symbol for symbol in YAHOO_CORE_TICKERS
+        if symbol != '^MOVE'
+        and (symbol not in close.columns or close[symbol].dropna().shape[0] < 30)
+    ]
+    for symbol in missing:
+        try:
+            close[symbol] = _download_nasdaq_history_symbol(symbol)
+            time.sleep(0.15)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    missing = [
+        symbol for symbol in YAHOO_CORE_TICKERS
+        if symbol != '^MOVE'
+        and (symbol not in close.columns or close[symbol].dropna().shape[0] < 30)
+    ]
+    live_has_required = all(
+        symbol in close.columns and close[symbol].dropna().shape[0] >= 126
+        for symbol in YAHOO_REQUIRED_TICKERS
+    )
+    if not live_has_required and cached_has_required:
+        # 已有最后成功数据时不要在 NASDAQ 降级也失败后继续轰炸 Yahoo。
+        return cached
+
+    consecutive_failures = 0
+    for symbol in missing:
+        try:
+            close[symbol] = _download_yahoo_chart_symbol(symbol)
+            consecutive_failures = 0
+            time.sleep(0.35)
+        except Exception as exc:
+            errors.append(str(exc))
+            consecutive_failures += 1
+            if consecutive_failures >= 2:
+                # 同一出口连续失败通常是 IP 级限流，继续逐代码重试只会加重封锁。
+                break
+
+    has_required = all(
+        symbol in close.columns and close[symbol].dropna().shape[0] >= 126
+        for symbol in YAHOO_REQUIRED_TICKERS
+    )
+    if has_required:
+        close = close.sort_index().ffill().dropna(how='all')
+        close.attrs["data_source"] = "live_market_sources"
+        close.attrs["cache_age_hours"] = 0.0
+        _write_frame_cache(close, "yahoo_core_close.csv")
+        return close
+
+    if cached_has_required:
+        return cached
+
+    detail = " | ".join(errors[-4:]) if errors else "Yahoo 返回数据不完整"
+    YAHOO_LAST_ERROR = (
+        "Yahoo 核心行情不可用且没有最近成功缓存。"
+        f"请确认 yfinance 已升级（建议 >=0.2.66）；详情: {detail}"
+    )
+    raise RuntimeError(YAHOO_LAST_ERROR)
+
+def _request_json_with_backoff(url, params=None, attempts=3):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36"
+    }
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            response = requests.get(
+                url, params=params, headers=headers, timeout=12
+            )
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                wait_seconds = float(retry_after) if retry_after else 2 ** (attempt + 1)
+                raise RuntimeError(f"HTTP 429，建议等待 {wait_seconds:.0f} 秒")
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("code") not in (None, "0"):
+                raise RuntimeError(payload.get("msg") or f"API code={payload.get('code')}")
+            return payload
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(2 ** (attempt + 1))
+    raise RuntimeError(f"API 请求失败: {last_error}")
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_okx_signal_inputs():
+    """一次成功后缓存 30 分钟；异常直接抛出，因此临时失败不会被缓存。"""
+    price = _request_json_with_backoff(
+        "https://www.okx.com/api/v5/market/history-candles",
+        params={"instId": "BTC-USDT", "bar": "1Dutc", "limit": "60"}
+    )
+    oi = _request_json_with_backoff(
+        "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume",
+        params={"ccy": "BTC", "period": "1D"}
+    )
+    funding = _request_json_with_backoff(
+        "https://www.okx.com/api/v5/public/funding-rate-history",
+        params={"instId": "BTC-USDT-SWAP", "limit": "100"}
+    )
+    return price, oi, funding
 
 RISK_SCORE_MAP = {
     "极高风险": 100,
@@ -149,13 +456,16 @@ def enrich_switch(s):
     })
     return enriched
 
-@st.cache_data(ttl=3600)
 def fetch_vix_data():
     try:
-        tickers = yf.Tickers('^VIX ^VIX3M')
-        hist = tickers.history(period='3mo')  
-        if not hist.empty and 'Close' in hist.columns:
-            close_data = hist['Close'].ffill().copy()
+        close_data = pd.concat(
+            {
+                '^VIX': fetch_cboe_official_history('VIX'),
+                '^VIX3M': fetch_cboe_official_history('VIX3M')
+            },
+            axis=1
+        ).sort_index().ffill().dropna().tail(90)
+        if not close_data.empty:
             close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
             
             # 【新增】引入微观快线(EMA5)与趋势慢线(EMA21)作为期限结构比率的动能依据
@@ -267,23 +577,26 @@ def fetch_vix_data():
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
     return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
 
-@st.cache_data(ttl=1800)
 def fetch_crypto_signals():
     try:
-        # 1. 价格数据：使用 yfinance 提取日线 (规避网络拦截，极度稳定)
-        btc_df = yf.Ticker('BTC-USD').history(period='45d')
-        if btc_df.empty:
-            raise Exception("YF 价格数据下载为空")
-        df_price = btc_df[['Close']].copy()
-        df_price.columns = ['close']
-        df_price.index = pd.to_datetime(df_price.index, utc=True).normalize()
+        # BTC 价格、OI 与资金费率全部走 OKX 官方 API，彻底移除该开关的 Yahoo 依赖。
+        price_res, r_res, fr_res = fetch_okx_signal_inputs()
 
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        if not price_res.get("data"):
+            raise Exception("OKX BTC 日线接口无返回数据")
+        price_data = []
+        for row in price_res['data']:
+            ts = pd.to_datetime(int(row[0]), unit='ms', utc=True).normalize()
+            price_data.append({'timestamp': ts, 'close': float(row[4])})
+        df_price = (
+            pd.DataFrame(price_data)
+            .drop_duplicates('timestamp', keep='last')
+            .set_index('timestamp')
+            .sort_index()
+        )
 
         # 2. 持仓量 (OI)：使用 OKX Rubik 历史接口
-        rubik_url = "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume?ccy=BTC&period=1D"
-        r_res = requests.get(rubik_url, headers=headers, timeout=5).json()
-        if r_res.get("code") != "0" or not r_res.get("data"):
+        if not r_res.get("data"):
             raise Exception(f"OKX OI 接口异常: {r_res.get('msg', '无返回数据')}")
             
         oi_data = []
@@ -294,9 +607,7 @@ def fetch_crypto_signals():
         df_oi = pd.DataFrame(oi_data).set_index('timestamp')
 
         # 3. 资金费率 (FR)：使用 OKX 历史资金费率接口
-        fr_url = "https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=100"
-        fr_res = requests.get(fr_url, headers=headers, timeout=5).json()
-        if fr_res.get("code") != "0" or not fr_res.get("data"):
+        if not fr_res.get("data"):
             raise Exception(f"OKX FR 接口异常: {fr_res.get('msg', '无返回数据')}")
             
         fr_data = []
@@ -438,32 +749,74 @@ def fetch_squeezemetrics_data():
         "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + " (兜底)"
     }
 
-@st.cache_data(ttl=14400)
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_cboe_official_history_cached(symbol):
+    """
+    CBOE 官方 CSV 是 VIX/VIX3M/VXN/VVIX/COR1M/DSPX 的首选源。
+    只缓存成功数据；网络临时失败时使用最近 10 天内的最后成功快照。
+    """
+    cache_name = f"cboe_{symbol.upper()}.csv"
+    url = f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
+    last_error = None
+
+    for attempt in range(2):
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15
+            )
+            if response.status_code == 429:
+                raise RuntimeError("CBOE HTTP 429")
+            response.raise_for_status()
+            df = pd.read_csv(io.StringIO(response.text))
+            df.columns = df.columns.str.strip().str.lower()
+            date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
+            value_col = 'close' if 'close' in df.columns else symbol.lower()
+            if date_col not in df.columns or value_col not in df.columns:
+                raise RuntimeError(f"CBOE {symbol} CSV 列结构变化")
+            result = pd.DataFrame({
+                symbol.upper(): pd.to_numeric(df[value_col], errors='coerce').values
+            }, index=pd.to_datetime(df[date_col], errors='coerce'))
+            result = (
+                result.loc[~result.index.isna()]
+                .dropna()
+                .sort_index()
+                .tail(800)
+            )
+            if result.shape[0] < 30:
+                raise RuntimeError(f"CBOE {symbol} 有效样本不足")
+            _write_frame_cache(result, cache_name)
+            return result.iloc[:, 0].rename(symbol.upper())
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(2)
+
+    cached = _read_frame_cache(cache_name)
+    if not cached.empty:
+        return cached.iloc[:, 0].rename(symbol.upper())
+    raise RuntimeError(f"CBOE {symbol} 数据不可用: {last_error}")
+
 def fetch_cboe_official_history(symbol):
     try:
-        url = f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        df = pd.read_csv(url)
-        df.columns = df.columns.str.lower()
-        date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
-        df['date'] = pd.to_datetime(df[date_col])
-        df.set_index('date', inplace=True)
-        df = df.sort_index()
-        return df['close']
+        return _fetch_cboe_official_history_cached(symbol)
     except Exception:
-        return pd.Series()
+        # 包装层不缓存失败结果，下次 Streamlit 重跑仍可立即恢复。
+        return pd.Series(dtype=float, name=symbol.upper())
 
-@st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
     try:
-        raw_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
-        yf_tickers = filter_leveraged_etfs(raw_tickers)
-        
-        yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
-        yf_data = yf_data.ffill()
-        latest = yf_data.iloc[-1]
-        
-        data = yf_data[['QQQ', 'SPY', 'IWM', 'RSP']].copy()
+        yf_data = fetch_yahoo_core_close()
+        required = ['QQQ', 'SPY', 'IWM', 'RSP']
+        missing = [
+            symbol for symbol in required
+            if symbol not in yf_data.columns or yf_data[symbol].dropna().shape[0] < 126
+        ]
+        if missing:
+            raise Exception(f"CTA 核心行情缺失: {', '.join(missing)}")
+        data = yf_data[required].dropna().tail(260).copy()
+        latest = data.iloc[-1]
         
         corr_official = fetch_cboe_official_history('COR1M')
         dspx_official = fetch_cboe_official_history('DSPX')
@@ -471,18 +824,19 @@ def calculate_quant_and_breadth_signals():
         if not corr_official.empty:
             corr_series = corr_official.reindex(data.index)
             if np.isnan(corr_series.iloc[-1]) or corr_series.tail(10).max() == corr_series.tail(10).min():
-                corr_series.iloc[-1] = latest.get('^COR1M', corr_series.dropna().iloc[-1] if not corr_series.dropna().empty else 17.8)
+                corr_series.iloc[-1] = corr_series.dropna().iloc[-1] if not corr_series.dropna().empty else 17.8
             corr_series = corr_series.ffill()
         else:
-            corr_series = yf_data['^COR1M']
+            # 保留 CTA 开关运行，相关性开关会因常数序列自动标记为数据断层。
+            corr_series = pd.Series(17.8, index=data.index, name='COR1M')
             
         if not dspx_official.empty:
             dspx_series = dspx_official.reindex(data.index)
             if np.isnan(dspx_series.iloc[-1]):
-                dspx_series.iloc[-1] = latest.get('^DSPX', dspx_series.dropna().iloc[-1] if not dspx_series.dropna().empty else 40.0)
+                dspx_series.iloc[-1] = dspx_series.dropna().iloc[-1] if not dspx_series.dropna().empty else 40.0
             dspx_series = dspx_series.ffill()
         else:
-            dspx_series = yf_data['^DSPX']
+            dspx_series = pd.Series(40.0, index=data.index, name='DSPX')
 
         # CTA 动向追踪
         cta_shorts_series = pd.Series(0, index=data.index)
@@ -614,7 +968,9 @@ def calculate_quant_and_breadth_signals():
             "combined_diag": combined_diag,  
             "corr_risk_level": corr_risk_level,
             "corr_risk_diag": corr_risk_diag,
-            "df_hist": df_hist.tail(60)
+            "df_hist": df_hist.tail(60),
+            "data_source": yf_data.attrs.get("data_source", "live_market_sources"),
+            "cache_age_hours": yf_data.attrs.get("cache_age_hours", 0.0)
         }
     except Exception as e:
         return {
@@ -624,14 +980,17 @@ def calculate_quant_and_breadth_signals():
             "corr_diag": "诊断异常", "disp_diag": "诊断异常", "combined_diag": "诊断异常"
         }
         
-@st.cache_data(ttl=3600)
 def fetch_vxn_vix_data():
     try:
-        tickers = yf.Tickers('^VXN ^VIX')
-        hist = tickers.history(period='3mo')
+        df = pd.concat(
+            {
+                '^VXN': fetch_cboe_official_history('VXN'),
+                '^VIX': fetch_cboe_official_history('VIX')
+            },
+            axis=1
+        ).sort_index().ffill().dropna().tail(90)
         
-        if not hist.empty and 'Close' in hist.columns:
-            df = hist['Close'].ffill().copy()
+        if not df.empty:
             
             df['Spread'] = df['^VXN'] - df['^VIX']
             df['Ratio'] = df['^VXN'] / df['^VIX']
@@ -704,18 +1063,38 @@ def fetch_vxn_vix_data():
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
     return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
 
-@st.cache_data(ttl=1800)
 def fetch_macro_liquidity_overlay():
     try:
-        tickers = ['^MOVE', '^VVIX', 'HYG', 'LQD']
-        raw = yf.download(tickers, period='6mo', progress=False)['Close'].ffill()
+        frames = []
+        source_notes = []
+        try:
+            yahoo_data = fetch_yahoo_core_close()
+            if yahoo_data.attrs.get("data_source") == "last_success_cache":
+                source_notes.append(
+                    f"Yahoo实时限流，使用最近成功缓存 "
+                    f"({yahoo_data.attrs.get('cache_age_hours', '?')}小时前)"
+                )
+            yahoo_cols = [
+                symbol for symbol in ['^MOVE', 'HYG', 'LQD']
+                if symbol in yahoo_data.columns
+            ]
+            if yahoo_cols:
+                frames.append(yahoo_data[yahoo_cols].tail(130))
+        except Exception as exc:
+            source_notes.append(f"Yahoo子集暂不可用: {exc}")
+
+        vvix = fetch_cboe_official_history('VVIX')
+        if not vvix.empty:
+            frames.append(vvix.rename('^VVIX').to_frame().tail(130))
+
+        raw = pd.concat(frames, axis=1).sort_index().ffill() if frames else pd.DataFrame()
         if raw.empty:
             raise Exception("宏观补充数据为空")
 
         available_cols = set(raw.columns)
         risk_points = 0
         opportunity_points = 0
-        details = []
+        details = source_notes
 
         if '^MOVE' in available_cols and raw['^MOVE'].dropna().shape[0] >= 30:
             move = raw['^MOVE'].dropna()
@@ -953,6 +1332,13 @@ crypto_profile = classify_crypto_profile(crypto_data)
 cta_profile = classify_cta_profile(quant_data)
 corr_profile = classify_corr_profile(quant_data)
 vxn_profile = classify_vxn_profile(vxn_vix_data)
+quant_cache_note = ""
+if quant_data.get("data_source") == "last_success_cache":
+    quant_cache_note = (
+        f"<br><span style='font-size:8pt;color:#d68910;'>"
+        f"Yahoo 实时限流，当前使用 {quant_data.get('cache_age_hours', '?')} 小时前的成功缓存。"
+        f"</span>"
+    )
 
 switches = [
     {
@@ -1000,7 +1386,7 @@ switches = [
                 f"<b>⚖️ 比率动能分项：</b>{vix_data.get('vix_ratio_diag')}<br>"
                 f"<b>📊 现货波动分项：</b>{vix_data.get('vix_spot_diag')}"
             ),
-            "update_cycle": "盘中实时波动 (YF延迟)",
+            "update_cycle": "CBOE 官方日线 (盘后更新)",
             "last_updated": now_str
         },
     {
@@ -1018,7 +1404,7 @@ switches = [
         "bottom_active": crypto_data["bottom_active"] if not crypto_data["error"] else False,
         "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
         "value": f"BTC现货: {crypto_data.get('btc_price', 'N/A')} ({crypto_data.get('price_trend', '')}) | OI: {crypto_data.get('oi', 'N/A')} ({crypto_data.get('oi_trend', '')}) | 费率: {crypto_data.get('funding_rate', 'N/A')}",
-        "source": "Yahoo Finance (K线) ✖ OKX 永续合约实时 API (OI与资金费率)",
+        "source": "OKX 官方 API (BTC K线 ✖ OI ✖ 资金费率)",
         "desc_bottom": "【缩量爆仓抄底】当 **价格下跌 + OI显著下降 + 费率转负**。代表做多杠杆被彻底清算，市场流动性恐慌见底，是高胜率左侧或右侧建仓点。",
         "desc_top": "【拥挤过载逃顶】触发两种情况立即防御：① **价格上涨 + OI上升 + 费率极高** (多头拥挤，极易被爆)；② **价格上涨 + OI下降** (缺乏新资金的假突破)。",
         "fetched_status": f"数据抓取失败 🔴 <br><span style='font-size:8pt;color:#e74c3c;'>异常原因: {crypto_data.get('msg', '未知断流')}</span>" if crypto_data["error"] else (
@@ -1046,11 +1432,13 @@ switches = [
         "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约跟空抛压面临彻底耗尽。",
         "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
         "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
-            "🚨 警报：系统性买盘进入衰竭点" if quant_data["cta_top_active"] else (
-                "🟢 激活：系统性空头抛压触底耗尽" if quant_data["cta_bottom_active"] else f"⚪ 运行中：{quant_data.get('cta_status')}"
-            )
+            (
+                "🚨 警报：系统性买盘进入衰竭点" if quant_data["cta_top_active"] else (
+                    "🟢 激活：系统性空头抛压触底耗尽" if quant_data["cta_bottom_active"] else f"⚪ 运行中：{quant_data.get('cta_status')}"
+                )
+            ) + quant_cache_note
         ),
-        "update_cycle": "盘中动态计算 (基于最新价)",
+        "update_cycle": "日线计算 (Yahoo可用时含最新价)",
         "last_updated": now_str
     },
     {
@@ -1076,6 +1464,7 @@ switches = [
             f"<b>🧯 风险等级：</b>{quant_data.get('corr_risk_level', '无信息')} - {quant_data.get('corr_risk_diag', '无信息')}<br>"
             f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
             f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
+            f"{quant_cache_note}"
         ),
         "update_cycle": "每日更新 (盘终结算)",
         "last_updated": now_str
@@ -1103,7 +1492,7 @@ switches = [
             f"<b>📊 微观动能：</b>{vxn_vix_data.get('spread_diag', '无信息')}<br>"
             f"<b>📉 情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
         ),
-        "update_cycle": "盘中实时波动 (YF延迟)",
+        "update_cycle": "CBOE 官方日线 (盘后更新)",
         "last_updated": now_str
     }
 ]
@@ -1247,10 +1636,14 @@ for i, s in enumerate(switches):
 # -----------------------------------------------------------------------------
 st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
 
-@st.cache_data(ttl=1800)
 def fetch_ndx_chart_data():
-    df = yf.Ticker('^NDX').history(period='3mo')
-    return df
+    try:
+        close = fetch_yahoo_core_close()
+        if '^NDX' not in close.columns:
+            return pd.DataFrame()
+        return close[['^NDX']].dropna().tail(66).rename(columns={'^NDX': 'Close'})
+    except Exception:
+        return pd.DataFrame()
 
 ndx_data = fetch_ndx_chart_data()
 if not ndx_data.empty:
