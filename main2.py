@@ -81,6 +81,15 @@ YAHOO_REQUIRED_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP']
 INTRADAY_ETF_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD']
 INTRADAY_VOL_TICKERS = ['^VIX', '^VIX3M', '^VXN']
 INTRADAY_TTL_SECONDS = 600
+# Massive（原 Polygon）指数 REST 快照可作为 CBOE 波动率指数的可选实时源。
+# 真实指数数据受许可约束；默认代码表仅在用户账号实际有相应 entitlement 时生效。
+MASSIVE_VOLATILITY_DEFAULT_TICKERS = {
+    '^VIX': 'I:VIX',
+    '^VIX3M': 'I:VIX3M',
+    '^VXN': 'I:VXN',
+    '^VVIX': 'I:VVIX',
+}
+MASSIVE_VOLATILITY_TTL_SECONDS = 60
 US_EASTERN = ZoneInfo("America/New_York")
 MARKET_CACHE_DIR = os.path.join(tempfile.gettempdir(), "sentinel2_market_cache")
 YAHOO_ATTEMPTED_THIS_RUN = False
@@ -88,6 +97,7 @@ YAHOO_LAST_ERROR = ""
 INTRADAY_ATTEMPTED_THIS_RUN = False
 INTRADAY_SNAPSHOT_THIS_RUN = None
 INTRADAY_LAST_ERROR = ""
+VOLATILITY_LAST_ERROR = ""
 
 def _market_cache_path(name):
     os.makedirs(MARKET_CACHE_DIR, exist_ok=True)
@@ -377,6 +387,112 @@ def _get_config_value(name, default=None):
         pass
     return os.getenv(name, default)
 
+def _massive_volatility_ticker_map():
+    """
+    默认使用 Massive 的 CBOE/ICE 指数代码；若账号中代码不同，可在
+    MASSIVE_VOL_TICKERS 中用 "内部代码=供应商代码" 逗号分隔覆盖。
+    例如：^VIX=I:VIX,^VXN=I:VXN,^VVIX=I:VVIX
+    """
+    mapping = dict(MASSIVE_VOLATILITY_DEFAULT_TICKERS)
+    overrides = _get_config_value("MASSIVE_VOL_TICKERS", "")
+    for item in str(overrides).split(','):
+        if '=' not in item:
+            continue
+        internal, provider = (part.strip() for part in item.split('=', 1))
+        if internal and provider:
+            mapping[internal.upper()] = provider.upper()
+    return mapping
+
+def _massive_timestamp(value):
+    """兼容 Massive REST 的纳秒时间戳与少数接口返回的毫秒时间戳。"""
+    numeric = int(float(value))
+    if numeric >= 10 ** 17:
+        unit = 'ns'
+    elif numeric >= 10 ** 14:
+        unit = 'us'
+    elif numeric >= 10 ** 11:
+        unit = 'ms'
+    else:
+        unit = 's'
+    return pd.to_datetime(numeric, unit=unit, utc=True)
+
+@st.cache_data(ttl=MASSIVE_VOLATILITY_TTL_SECONDS, show_spinner=False)
+def _fetch_massive_volatility_snapshot_cached(trading_date):
+    """
+    仅接受标记为 REAL-TIME 的指数快照，绝不把 15 分钟延迟数据伪装成实时。
+    不抛出单一代码的失败，方便 VIX/VXN/VVIX/MOVE 独立降级到日线。
+    """
+    api_key = _get_config_value("MASSIVE_API_KEY")
+    if not api_key:
+        return pd.DataFrame()
+
+    rows = []
+    errors = []
+    for internal_symbol, provider_symbol in _massive_volatility_ticker_map().items():
+        try:
+            response = requests.get(
+                "https://api.massive.com/v3/snapshot/indices",
+                params={"ticker": provider_symbol, "apiKey": api_key},
+                timeout=10
+            )
+            if response.status_code == 429:
+                raise RuntimeError("Massive HTTP 429")
+            response.raise_for_status()
+            results = response.json().get("results") or []
+            item = next(
+                (entry for entry in results
+                 if str(entry.get("ticker", "")).upper() == provider_symbol),
+                results[0] if results else None
+            )
+            if not item:
+                raise RuntimeError("快照结果为空")
+            if item.get("error"):
+                raise RuntimeError(
+                    f"{item.get('error')}: {item.get('message', '无权限或代码不存在')}"
+                )
+            timeframe = str(item.get("timeframe", "")).upper()
+            if timeframe != "REAL-TIME":
+                raise RuntimeError(
+                    f"返回 {timeframe or '未知'} 数据，未获得 REAL-TIME 权限"
+                )
+            price = item.get("value")
+            updated_at = item.get("last_updated")
+            if price is None or updated_at is None:
+                raise RuntimeError("快照缺少 value 或 last_updated")
+            rows.append({
+                "symbol": internal_symbol,
+                "price": float(price),
+                "timestamp": _massive_timestamp(updated_at),
+                "source": "Massive Indices REAL-TIME"
+            })
+        except Exception as exc:
+            errors.append(f"Massive {internal_symbol}: {exc}")
+
+    frame = pd.DataFrame(rows)
+    if not frame.empty:
+        frame = frame.set_index("symbol")
+    frame.attrs["provider_errors"] = errors
+    return frame
+
+def fetch_realtime_volatility_snapshot():
+    """盘中读取独立的授权波动率快照；无授权或休市时安静回退日线。"""
+    global VOLATILITY_LAST_ERROR
+    session_info = get_market_session()
+    if session_info["session"] != "regular":
+        return pd.DataFrame()
+    if not _get_config_value("MASSIVE_API_KEY"):
+        return pd.DataFrame()
+    try:
+        frame = _fetch_massive_volatility_snapshot_cached(
+            session_info["now_et"].date().isoformat()
+        )
+        errors = frame.attrs.get("provider_errors", [])
+        VOLATILITY_LAST_ERROR = " | ".join(errors[-3:]) if errors else ""
+        return frame
+    except Exception as exc:
+        VOLATILITY_LAST_ERROR = f"Massive 波动率快照失败: {exc}"
+        return pd.DataFrame()
+
 def _read_intraday_cache(max_age_minutes=90):
     path = _market_cache_path("intraday_snapshot.csv")
     if not os.path.exists(path):
@@ -559,7 +675,11 @@ def _fetch_intraday_snapshot_cached(session_name, trading_date):
     yahoo_tickers = [
         symbol for symbol in INTRADAY_ETF_TICKERS
         if symbol not in covered
-    ] + INTRADAY_VOL_TICKERS
+    ]
+    # 配置了授权指数源后，VIX/VXN/VVIX/MOVE 由独立 60 秒快照处理，
+    # 不再每十分钟把这些指数重新打到 Yahoo，避免其一次失败拖累所有开关。
+    if not _get_config_value("MASSIVE_API_KEY"):
+        yahoo_tickers.extend(INTRADAY_VOL_TICKERS)
     if session_name == "regular":
         yahoo_tickers.append("^NDX")
 
@@ -616,17 +736,38 @@ def fetch_intraday_snapshot():
         return pd.DataFrame()
 
     INTRADAY_ATTEMPTED_THIS_RUN = True
+    base_snapshot = pd.DataFrame()
+    provider_errors = []
     try:
-        snapshot = _fetch_intraday_snapshot_cached(
+        base_snapshot = _fetch_intraday_snapshot_cached(
             session_info["session"],
             session_info["now_et"].date().isoformat()
         )
-        INTRADAY_SNAPSHOT_THIS_RUN = snapshot
-        INTRADAY_LAST_ERROR = ""
-        return snapshot
     except Exception as exc:
-        INTRADAY_LAST_ERROR = str(exc)
+        provider_errors.append(str(exc))
+
+    # 授权指数快照独立于 Yahoo/Alpaca 的十分钟 ETF 快照，可每分钟更新，
+    # 并且在 ETF 通道临时故障时仍保留 VIX/VXN/VVIX/MOVE 的盘中数据。
+    volatility_snapshot = fetch_realtime_volatility_snapshot()
+    provider_errors.extend(base_snapshot.attrs.get("provider_errors", []))
+    provider_errors.extend(volatility_snapshot.attrs.get("provider_errors", []))
+    if VOLATILITY_LAST_ERROR:
+        provider_errors.append(VOLATILITY_LAST_ERROR)
+
+    frames = [frame for frame in (volatility_snapshot, base_snapshot) if not frame.empty]
+    if not frames:
+        INTRADAY_LAST_ERROR = "盘前/日内快照不可用: " + " | ".join(
+            provider_errors[-4:]
+        )
         return pd.DataFrame()
+
+    # 授权波动率源优先于 Yahoo 同名指数，避免低质量备用报价覆盖授权实时值。
+    snapshot = pd.concat(frames, axis=0)
+    snapshot = snapshot[~snapshot.index.duplicated(keep="first")]
+    snapshot.attrs["provider_errors"] = list(dict.fromkeys(provider_errors))
+    INTRADAY_SNAPSHOT_THIS_RUN = snapshot
+    INTRADAY_LAST_ERROR = ""
+    return snapshot
 
 def overlay_intraday_prices(daily_frame, symbols, require_all=False):
     if daily_frame is None or daily_frame.empty:
@@ -1474,6 +1615,24 @@ def fetch_macro_liquidity_overlay():
             frames.append(vvix.rename('^VVIX').to_frame().tail(130))
 
         raw = pd.concat(frames, axis=1).sort_index().ffill() if frames else pd.DataFrame()
+        # MOVE/VVIX 的日线骨架仅在授权指数源确实给出 REAL-TIME 值时覆盖。
+        # 无授权、无权限或休市时 overlay 会保持官方最近日线，不会伪造盘中更新。
+        raw = overlay_intraday_prices(
+            raw, ['^MOVE', '^VVIX'], require_all=False
+        )
+        realtime_vol_symbols = raw.attrs.get("intraday_symbols", [])
+        if realtime_vol_symbols:
+            source_notes.append(
+                "授权波动率盘中快照: "
+                + ", ".join(realtime_vol_symbols)
+                + f"（{raw.attrs.get('quote_sources', '实时指数源')}）"
+            )
+            macro_quote_meta = {
+                "quote_mode": raw.attrs.get("quote_mode", "daily_fallback"),
+                "quote_age_minutes": raw.attrs.get("quote_age_minutes"),
+                "quote_sources": raw.attrs.get("quote_sources", "实时指数源"),
+                "fetched_at": market_data_timestamp(raw)
+            }
         if raw.empty:
             raise Exception("宏观补充数据为空")
 
@@ -1567,8 +1726,11 @@ alpaca_configured = bool(
     _get_config_value("ALPACA_API_KEY")
     and _get_config_value("ALPACA_API_SECRET")
 )
+massive_configured = bool(_get_config_value("MASSIVE_API_KEY"))
 auto_refresh_seconds = (
-    INTRADAY_TTL_SECONDS if alpaca_configured else 15 * 60
+    MASSIVE_VOLATILITY_TTL_SECONDS
+    if massive_configured and market_session["session"] == "regular"
+    else (INTRADAY_TTL_SECONDS if alpaca_configured else 15 * 60)
 )
 st.sidebar.markdown("### ⏱️ 盘前 / 日内行情")
 st.sidebar.caption(
@@ -1582,6 +1744,7 @@ auto_refresh = st.sidebar.checkbox(
 )
 if st.sidebar.button("🔄 立即刷新最新快照"):
     _fetch_intraday_snapshot_cached.clear()
+    _fetch_massive_volatility_snapshot_cached.clear()
 
 if market_session["active"] and auto_refresh:
     components.html(
@@ -1640,6 +1803,10 @@ else:
 if not alpaca_configured:
     st.sidebar.caption(
         "未配置 Alpaca：ETF 使用 Yahoo 15分钟线，并将自动刷新降为15分钟以降低限流风险。"
+    )
+if massive_configured:
+    st.sidebar.caption(
+        "Massive 指数源已配置：仅接受 REAL-TIME 波动率快照；盘中每60秒刷新。"
     )
 
 def classify_sm_gex_dix_risk(gex_val, dix_val):
