@@ -79,7 +79,8 @@ def filter_leveraged_etfs(ticker_list):
 YAHOO_CORE_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD', '^MOVE', '^NDX']
 YAHOO_REQUIRED_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP']
 INTRADAY_ETF_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD']
-INTRADAY_VOL_TICKERS = ['^VIX', '^VIX3M', '^VXN']
+# 仅一个低频 Yahoo 批次：能拿到即覆盖 CBOE/Yahoo 日线，缺失或过期则自动保留日线。
+INTRADAY_VOL_TICKERS = ['^VIX', '^VIX3M', '^VXN', '^VVIX', '^MOVE']
 INTRADAY_TTL_SECONDS = 600
 # Massive（原 Polygon）指数 REST 快照可作为 CBOE 波动率指数的可选实时源。
 # 真实指数数据受许可约束；默认代码表仅在用户账号实际有相应 entitlement 时生效。
@@ -387,6 +388,14 @@ def _get_config_value(name, default=None):
         pass
     return os.getenv(name, default)
 
+def _paid_volatility_source_enabled():
+    """
+    默认完全不用付费指数源：CBOE 日线是事实基准，Yahoo 盘中仅作可选覆盖。
+    即使 Secrets 中遗留 MASSIVE_API_KEY，也不会发起请求；只有显式设为 true 才启用。
+    """
+    value = _get_config_value("ENABLE_PAID_VOLATILITY_SOURCE", "false")
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 def _massive_volatility_ticker_map():
     """
     默认使用 Massive 的 CBOE/ICE 指数代码；若账号中代码不同，可在
@@ -479,6 +488,8 @@ def fetch_realtime_volatility_snapshot():
     global VOLATILITY_LAST_ERROR
     session_info = get_market_session()
     if session_info["session"] != "regular":
+        return pd.DataFrame()
+    if not _paid_volatility_source_enabled():
         return pd.DataFrame()
     if not _get_config_value("MASSIVE_API_KEY"):
         return pd.DataFrame()
@@ -678,7 +689,7 @@ def _fetch_intraday_snapshot_cached(session_name, trading_date):
     ]
     # 配置了授权指数源后，VIX/VXN/VVIX/MOVE 由独立 60 秒快照处理，
     # 不再每十分钟把这些指数重新打到 Yahoo，避免其一次失败拖累所有开关。
-    if not _get_config_value("MASSIVE_API_KEY"):
+    if not _paid_volatility_source_enabled():
         yahoo_tickers.extend(INTRADAY_VOL_TICKERS)
     if session_name == "regular":
         yahoo_tickers.append("^NDX")
@@ -1726,10 +1737,10 @@ alpaca_configured = bool(
     _get_config_value("ALPACA_API_KEY")
     and _get_config_value("ALPACA_API_SECRET")
 )
-massive_configured = bool(_get_config_value("MASSIVE_API_KEY"))
+paid_volatility_enabled = _paid_volatility_source_enabled()
 auto_refresh_seconds = (
     MASSIVE_VOLATILITY_TTL_SECONDS
-    if massive_configured and market_session["session"] == "regular"
+    if paid_volatility_enabled and market_session["session"] == "regular"
     else (INTRADAY_TTL_SECONDS if alpaca_configured else 15 * 60)
 )
 st.sidebar.markdown("### ⏱️ 盘前 / 日内行情")
@@ -1791,11 +1802,11 @@ if market_session["active"]:
                 for error_text in provider_errors:
                     st.caption(error_text)
     else:
-        st.sidebar.warning(
-            "最新快照暂不可用，模型已自动退回最近日线；不会把旧数据伪装成实时。"
+        st.sidebar.info(
+            "盘中快照暂不可用；CBOE/Yahoo 最近有效日线仍作为模型基准运行。"
         )
         if INTRADAY_LAST_ERROR:
-            with st.sidebar.expander("查看真实失败原因", expanded=True):
+            with st.sidebar.expander("查看盘中快照诊断", expanded=False):
                 st.code(INTRADAY_LAST_ERROR, language=None)
 else:
     st.sidebar.info("当前休市，停止轮询并使用最近有效收盘数据。")
@@ -1804,9 +1815,9 @@ if not alpaca_configured:
     st.sidebar.caption(
         "未配置 Alpaca：ETF 使用 Yahoo 15分钟线，并将自动刷新降为15分钟以降低限流风险。"
     )
-if massive_configured:
+if paid_volatility_enabled:
     st.sidebar.caption(
-        "Massive 指数源已配置：仅接受 REAL-TIME 波动率快照；盘中每60秒刷新。"
+        "已显式启用付费指数源：仅接受 REAL-TIME 波动率快照；盘中每60秒刷新。"
     )
 
 def classify_sm_gex_dix_risk(gex_val, dix_val):
@@ -2021,7 +2032,7 @@ switches = [
             "name": "VIX 期限结构与趋势动能雷达",
             "rank": 1,
             "weight": 1.35,
-            "cycle_key": "intraday",
+            "cycle_key": "hybrid",
             "core_position": "系统性波动压力与期限结构拐点",
             "importance": "最高权重：期限结构破位经常领先系统性风控，盘中敏感度最高。",
             "risk_level": vix_profile["risk_level"],
@@ -2031,7 +2042,7 @@ switches = [
             "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
             "top_active": vix_data["top_active"] if not vix_data["error"] else False,
             "value": f"今日比率: {vix_data.get('ratio', 'N/A')} | EMA5/21状态: {'快线上穿/多头' if vix_data['bottom_active'] else '死叉/发散'} | VIX现货: {vix_data.get('vix', 'N/A')}",
-            "source": "CBOE 日线骨架 ✖ Yahoo 15分钟波动率快照",
+            "source": "CBOE 日线基准 ✖ Yahoo 15分钟快照（可用才覆盖）",
             "desc_bottom": "【双向修复抄底标准】当隐含波动率比率向上收复突破 1.0 平衡线（摆脱远期深度倒挂状态），或者在低位倒挂修复带(<=1.05)确立微观动能均线金叉（EMA5 > EMA21）时激活。这标志着全市场非理性非对称抛售流动性枯竭，买盘筹码右侧转折确立，转入高胜率抄底期。",
             "desc_top": "【三维立体逃顶标准】满足以下任一核心条件立即拉响风控防御：①比率冲破 1.25 绝对贪婪上限，期权空头无防备极度拥挤；②比率跌破 1.0 平衡线，长短期期限结构倒挂、牛市基石全面动摇；③比率在高位自满警戒带(>=1.15)发生了 EMA5 下穿 EMA21 死叉，显示做多边际买盘已经枯竭见顶。",
             "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
@@ -2040,7 +2051,7 @@ switches = [
                 f"<b>📊 现货波动分项：</b>{vix_data.get('vix_spot_diag')}"
                 f"{vix_freshness_note}"
             ),
-            "update_cycle": "10–15分钟快照；CBOE日线兜底",
+            "update_cycle": "CBOE日线基准；Yahoo盘中可用时覆盖，否则保持日线",
             "last_updated": vix_data.get("fetched_at", now_str)
         },
     {
@@ -2129,7 +2140,7 @@ switches = [
         "name": "VXN-VIX 科技股雷达",
         "rank": 4,
         "weight": 1.05,
-        "cycle_key": "intraday",
+            "cycle_key": "hybrid",
         "core_position": "科技股相对波动溢价与纳指踩踏风险",
         "importance": "中高权重：对纳指/AI/高Beta科技仓位的即时风控很敏感。",
         "risk_level": vxn_profile["risk_level"],
@@ -2139,7 +2150,7 @@ switches = [
         "bottom_active": vxn_vix_data["bottom_active"] if not vxn_vix_data["error"] else False,
         "top_active": vxn_vix_data["top_active"] if not vxn_vix_data["error"] else False,
         "value": f"Spread: {vxn_vix_data.get('current_spread', 'N/A')} | Ratio: {vxn_vix_data.get('current_ratio', 'N/A')} | 熔断风控实时检测",
-        "source": "CBOE 日线骨架 ✖ Yahoo 15分钟 VXN/VIX 快照",
+        "source": "CBOE 日线基准 ✖ Yahoo 15分钟 VXN/VIX 快照（可用才覆盖）",
         "desc_bottom": "【右侧出击】当剪刀差自高位（>8.0）回落，且微观动能死叉（EMA5 < EMA21）时激活。此时非对称踩踏结束，IV Crush 来临，是高弹性科技股胜率极高的反转买点。",
         "desc_top": "【双重风控防御】① 火山口（单边踩踏）：极高位金叉发散，无条件熔断科技股多头；② 暴风雨前夜（隐性筑顶）：低位自满区间突发金叉，主力悄然买入 Put，需立刻收紧止盈或做空保护。",
         "fetched_status": "数据抓取失败 🔴" if vxn_vix_data["error"] else (
@@ -2148,7 +2159,7 @@ switches = [
             f"<b>📉 情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
             f"{vxn_freshness_note}"
         ),
-        "update_cycle": "10–15分钟快照；CBOE日线兜底",
+        "update_cycle": "CBOE日线基准；Yahoo盘中可用时覆盖，否则保持日线",
         "last_updated": vxn_vix_data.get("fetched_at", now_str)
     }
 ]
