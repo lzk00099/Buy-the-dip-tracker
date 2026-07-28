@@ -4,15 +4,10 @@ import numpy as np
 import yfinance as yf
 import requests
 import datetime
-import io
 import os
-import tempfile
 import time
-from urllib.parse import quote
-from zoneinfo import ZoneInfo
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import streamlit.components.v1 as components
 
 # -----------------------------------------------------------------------------
 # 1. 页面基本配置与全局样式
@@ -73,596 +68,6 @@ def filter_leveraged_etfs(ticker_list):
     """
     known_lev_etfs = {'TQQQ', 'SQQQ', 'UPRO', 'SPXU', 'SOXL', 'SOXS', 'FAS', 'FAZ', 'YINN', 'YANG', 'UVXY', 'VIXY', 'SPXL'}
     return [ticker for ticker in ticker_list if str(ticker).upper() not in known_lev_etfs]
-
-# Yahoo 对共享云 IP 的限流会影响同一次 Streamlit 重跑中的所有 yf 调用。
-# 将仍需 Yahoo 的品种收口到一个串行批次；波动率指数与 BTC 在下方改走官方源。
-YAHOO_CORE_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD', '^MOVE', '^NDX']
-YAHOO_REQUIRED_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP']
-INTRADAY_ETF_TICKERS = ['QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD']
-INTRADAY_VOL_TICKERS = ['^VIX', '^VIX3M', '^VXN']
-INTRADAY_TTL_SECONDS = 600
-US_EASTERN = ZoneInfo("America/New_York")
-MARKET_CACHE_DIR = os.path.join(tempfile.gettempdir(), "sentinel2_market_cache")
-YAHOO_ATTEMPTED_THIS_RUN = False
-YAHOO_LAST_ERROR = ""
-
-def _market_cache_path(name):
-    os.makedirs(MARKET_CACHE_DIR, exist_ok=True)
-    return os.path.join(MARKET_CACHE_DIR, name)
-
-def _read_frame_cache(name, max_age_days=10):
-    path = _market_cache_path(name)
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    age_seconds = time.time() - os.path.getmtime(path)
-    if age_seconds > max_age_days * 86400:
-        return pd.DataFrame()
-    try:
-        cached = pd.read_csv(path, index_col=0, parse_dates=True)
-        cached.index = pd.to_datetime(cached.index, errors='coerce')
-        cached = cached.loc[~cached.index.isna()].sort_index()
-        cached.attrs["data_source"] = "last_success_cache"
-        cached.attrs["cache_age_hours"] = round(age_seconds / 3600, 1)
-        return cached
-    except Exception:
-        return pd.DataFrame()
-
-def _write_frame_cache(frame, name):
-    if frame is None or frame.empty:
-        return
-    path = _market_cache_path(name)
-    temp_path = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
-    frame.to_csv(temp_path)
-    os.replace(temp_path, path)
-
-def _extract_yahoo_close(raw, requested_tickers):
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-
-    if isinstance(raw.columns, pd.MultiIndex):
-        level_0 = raw.columns.get_level_values(0)
-        level_1 = raw.columns.get_level_values(1)
-        if 'Close' in level_0:
-            close = raw['Close'].copy()
-        elif 'Close' in level_1:
-            close = raw.xs('Close', axis=1, level=1).copy()
-        else:
-            return pd.DataFrame()
-    elif 'Close' in raw.columns and len(requested_tickers) == 1:
-        close = raw[['Close']].rename(columns={'Close': requested_tickers[0]})
-    else:
-        return pd.DataFrame()
-
-    if isinstance(close, pd.Series):
-        close = close.to_frame(name=requested_tickers[0])
-    close.columns = [str(col).upper() for col in close.columns]
-    close.index = (
-        pd.to_datetime(close.index, errors='coerce', utc=True)
-        .tz_convert(None)
-        .normalize()
-    )
-    close = close.loc[~close.index.isna()]
-    close = close[~close.index.duplicated(keep='last')].sort_index()
-    return close.apply(pd.to_numeric, errors='coerce').dropna(how='all')
-
-def _download_yahoo_chart_symbol(symbol):
-    encoded_symbol = quote(symbol, safe='')
-    params = {"range": "1y", "interval": "1d", "events": "history"}
-    last_error = None
-    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
-        try:
-            response = requests.get(
-                f"https://{host}/v8/finance/chart/{encoded_symbol}",
-                params=params,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=8
-            )
-            if response.status_code == 429:
-                raise RuntimeError("Yahoo HTTP 429")
-            response.raise_for_status()
-            result = response.json().get("chart", {}).get("result")
-            if not result:
-                raise RuntimeError("Yahoo chart 返回为空")
-            result = result[0]
-            timestamps = result.get("timestamp") or []
-            quotes = result.get("indicators", {}).get("quote") or []
-            closes = quotes[0].get("close") if quotes else []
-            if not timestamps or not closes:
-                raise RuntimeError("Yahoo chart 缺少日期或收盘价")
-            series = pd.Series(
-                closes,
-                index=(
-                    pd.to_datetime(timestamps, unit='s', utc=True)
-                    .tz_convert(None)
-                    .normalize()
-                ),
-                name=symbol
-            )
-            return pd.to_numeric(series, errors='coerce').dropna()
-        except Exception as exc:
-            last_error = exc
-    raise RuntimeError(f"{symbol} 直接行情失败: {last_error}")
-
-def _download_nasdaq_history_symbol(symbol):
-    """
-    NASDAQ 官方历史行情作为非 Yahoo 冷启动降级源。
-    支持本应用所需 ETF 以及 NDX；MOVE 不在该接口的代码表中。
-    """
-    if symbol == '^NDX':
-        api_symbol, asset_class = 'NDX', 'index'
-    elif symbol in {'QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD'}:
-        api_symbol, asset_class = symbol, 'etf'
-    else:
-        raise RuntimeError(f"NASDAQ 降级源不支持 {symbol}")
-
-    today = datetime.date.today()
-    params = {
-        "assetclass": asset_class,
-        "fromdate": (today - datetime.timedelta(days=370)).isoformat(),
-        "todate": today.isoformat(),
-        "limit": "5000"
-    }
-    response = requests.get(
-        f"https://api.nasdaq.com/api/quote/{quote(api_symbol, safe='')}/historical",
-        params=params,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "application/json, text/plain, */*",
-            "Origin": "https://www.nasdaq.com",
-            "Referer": "https://www.nasdaq.com/"
-        },
-        timeout=12
-    )
-    if response.status_code == 429:
-        raise RuntimeError("NASDAQ HTTP 429")
-    response.raise_for_status()
-    rows = (
-        response.json().get("data", {})
-        .get("tradesTable", {})
-        .get("rows")
-    )
-    if not rows:
-        raise RuntimeError(f"NASDAQ {symbol} 历史行情为空")
-
-    frame = pd.DataFrame(rows)
-    if 'date' not in frame.columns or 'close' not in frame.columns:
-        raise RuntimeError(f"NASDAQ {symbol} 返回列结构变化")
-    values = pd.to_numeric(
-        frame['close'].astype(str).str.replace(r'[$,]', '', regex=True),
-        errors='coerce'
-    )
-    series = pd.Series(
-        values.values,
-        index=pd.to_datetime(frame['date'], errors='coerce'),
-        name=symbol
-    )
-    series = series.loc[~series.index.isna()].dropna().sort_index()
-    if series.shape[0] < 126:
-        raise RuntimeError(f"NASDAQ {symbol} 有效样本不足")
-    return series
-
-@st.cache_data(ttl=21600, show_spinner=False)
-def fetch_yahoo_core_close():
-    """
-    仅保留一个 Yahoo 批次，并关闭 yfinance 多线程，避免冷启动时请求风暴。
-    yfinance 失败时依次尝试 NASDAQ 官方历史行情与 Yahoo chart 端点；
-    仍失败则读取最近成功缓存。
-    此函数抛出的异常不会被 st.cache_data 缓存。
-    """
-    global YAHOO_ATTEMPTED_THIS_RUN, YAHOO_LAST_ERROR
-    if YAHOO_ATTEMPTED_THIS_RUN:
-        raise RuntimeError(
-            YAHOO_LAST_ERROR or "本轮页面渲染已尝试 Yahoo，停止重复请求。"
-        )
-    YAHOO_ATTEMPTED_THIS_RUN = True
-
-    errors = []
-    close = pd.DataFrame()
-    cached = _read_frame_cache("yahoo_core_close.csv")
-    cached_has_required = all(
-        symbol in cached.columns and cached[symbol].dropna().shape[0] >= 126
-        for symbol in YAHOO_REQUIRED_TICKERS
-    )
-
-    try:
-        raw = yf.download(
-            YAHOO_CORE_TICKERS,
-            period='1y',
-            interval='1d',
-            auto_adjust=False,
-            actions=False,
-            progress=False,
-            threads=False,
-            timeout=10,
-            group_by='column'
-        )
-        close = _extract_yahoo_close(raw, YAHOO_CORE_TICKERS)
-    except Exception as exc:
-        errors.append(f"yfinance: {exc}")
-
-    missing = [
-        symbol for symbol in YAHOO_CORE_TICKERS
-        if symbol != '^MOVE'
-        and (symbol not in close.columns or close[symbol].dropna().shape[0] < 30)
-    ]
-    for symbol in missing:
-        try:
-            close[symbol] = _download_nasdaq_history_symbol(symbol)
-            time.sleep(0.15)
-        except Exception as exc:
-            errors.append(str(exc))
-
-    missing = [
-        symbol for symbol in YAHOO_CORE_TICKERS
-        if symbol != '^MOVE'
-        and (symbol not in close.columns or close[symbol].dropna().shape[0] < 30)
-    ]
-    live_has_required = all(
-        symbol in close.columns and close[symbol].dropna().shape[0] >= 126
-        for symbol in YAHOO_REQUIRED_TICKERS
-    )
-    if not live_has_required and cached_has_required:
-        # 已有最后成功数据时不要在 NASDAQ 降级也失败后继续轰炸 Yahoo。
-        return cached
-
-    consecutive_failures = 0
-    for symbol in missing:
-        try:
-            close[symbol] = _download_yahoo_chart_symbol(symbol)
-            consecutive_failures = 0
-            time.sleep(0.35)
-        except Exception as exc:
-            errors.append(str(exc))
-            consecutive_failures += 1
-            if consecutive_failures >= 2:
-                # 同一出口连续失败通常是 IP 级限流，继续逐代码重试只会加重封锁。
-                break
-
-    has_required = all(
-        symbol in close.columns and close[symbol].dropna().shape[0] >= 126
-        for symbol in YAHOO_REQUIRED_TICKERS
-    )
-    if has_required:
-        close = close.sort_index().ffill().dropna(how='all')
-        close.attrs["data_source"] = "live_market_sources"
-        close.attrs["cache_age_hours"] = 0.0
-        _write_frame_cache(close, "yahoo_core_close.csv")
-        return close
-
-    if cached_has_required:
-        return cached
-
-    detail = " | ".join(errors[-4:]) if errors else "Yahoo 返回数据不完整"
-    YAHOO_LAST_ERROR = (
-        "Yahoo 核心行情不可用且没有最近成功缓存。"
-        f"请确认 yfinance 已升级（建议 >=0.2.66）；详情: {detail}"
-    )
-    raise RuntimeError(YAHOO_LAST_ERROR)
-
-def get_market_session(now_et=None):
-    now_et = now_et or datetime.datetime.now(US_EASTERN)
-    current_time = now_et.time()
-    if now_et.weekday() >= 5:
-        session = "closed"
-    elif datetime.time(4, 0) <= current_time < datetime.time(9, 30):
-        session = "premarket"
-    elif datetime.time(9, 30) <= current_time < datetime.time(16, 0):
-        session = "regular"
-    elif datetime.time(16, 0) <= current_time < datetime.time(20, 0):
-        session = "postmarket"
-    else:
-        session = "closed"
-    labels = {
-        "premarket": "盘前",
-        "regular": "盘中",
-        "postmarket": "盘后",
-        "closed": "休市"
-    }
-    return {
-        "session": session,
-        "label": labels[session],
-        "active": session != "closed",
-        "now_et": now_et
-    }
-
-def _get_config_value(name, default=None):
-    try:
-        value = st.secrets.get(name)
-        if value:
-            return str(value)
-    except Exception:
-        pass
-    return os.getenv(name, default)
-
-def _read_intraday_cache(max_age_minutes=90):
-    path = _market_cache_path("intraday_snapshot.csv")
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    age_minutes = (time.time() - os.path.getmtime(path)) / 60
-    if age_minutes > max_age_minutes:
-        return pd.DataFrame()
-    try:
-        frame = pd.read_csv(path, index_col=0)
-        frame.index = frame.index.astype(str)
-        frame["price"] = pd.to_numeric(frame["price"], errors="coerce")
-        frame["timestamp"] = pd.to_datetime(
-            frame["timestamp"], errors="coerce", utc=True
-        )
-        frame = frame.dropna(subset=["price", "timestamp"])
-        if frame.empty:
-            return frame
-        today_et = datetime.datetime.now(US_EASTERN).date()
-        latest_date_et = frame["timestamp"].max().tz_convert(US_EASTERN).date()
-        if latest_date_et != today_et:
-            return pd.DataFrame()
-        if "source" not in frame.columns:
-            frame["source"] = "last_intraday_cache"
-        frame["source"] = frame["source"].astype(str) + " (缓存)"
-        return frame
-    except Exception:
-        return pd.DataFrame()
-
-def _write_intraday_cache(frame):
-    if frame is None or frame.empty:
-        return
-    path = _market_cache_path("intraday_snapshot.csv")
-    temp_path = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
-    frame.to_csv(temp_path)
-    os.replace(temp_path, path)
-
-def _fetch_alpaca_etf_snapshot():
-    api_key = _get_config_value("ALPACA_API_KEY")
-    api_secret = _get_config_value("ALPACA_API_SECRET")
-    if not api_key or not api_secret:
-        raise RuntimeError("未配置 ALPACA_API_KEY / ALPACA_API_SECRET")
-
-    feed = _get_config_value("ALPACA_FEED", "iex")
-    response = requests.get(
-        "https://data.alpaca.markets/v2/stocks/bars/latest",
-        params={
-            "symbols": ",".join(INTRADAY_ETF_TICKERS),
-            "feed": feed
-        },
-        headers={
-            "APCA-API-KEY-ID": api_key,
-            "APCA-API-SECRET-KEY": api_secret
-        },
-        timeout=12
-    )
-    if response.status_code == 429:
-        raise RuntimeError("Alpaca HTTP 429")
-    response.raise_for_status()
-    bars = response.json().get("bars") or {}
-    rows = []
-    for symbol, bar in bars.items():
-        price = bar.get("c")
-        timestamp = bar.get("t")
-        if price is not None and timestamp:
-            rows.append({
-                "symbol": symbol,
-                "price": float(price),
-                "timestamp": pd.to_datetime(timestamp, utc=True),
-                "source": f"Alpaca {feed}"
-            })
-    if not rows:
-        raise RuntimeError("Alpaca 最新分钟线为空")
-    return pd.DataFrame(rows).set_index("symbol")
-
-def _extract_intraday_close(raw, requested_tickers):
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-    if isinstance(raw.columns, pd.MultiIndex):
-        level_0 = raw.columns.get_level_values(0)
-        level_1 = raw.columns.get_level_values(1)
-        if "Close" in level_0:
-            close = raw["Close"].copy()
-        elif "Close" in level_1:
-            close = raw.xs("Close", axis=1, level=1).copy()
-        else:
-            return pd.DataFrame()
-    elif "Close" in raw.columns and len(requested_tickers) == 1:
-        close = raw[["Close"]].rename(columns={"Close": requested_tickers[0]})
-    else:
-        return pd.DataFrame()
-    if isinstance(close, pd.Series):
-        close = close.to_frame(name=requested_tickers[0])
-    close.columns = [str(col).upper() for col in close.columns]
-    close.index = pd.to_datetime(close.index, errors="coerce", utc=True)
-    close = close.loc[~close.index.isna()].sort_index()
-    return close.apply(pd.to_numeric, errors="coerce").dropna(how="all")
-
-def _fetch_yahoo_intraday_snapshot(tickers):
-    if not tickers:
-        return pd.DataFrame()
-    raw = yf.download(
-        tickers,
-        period="5d",
-        interval="15m",
-        prepost=True,
-        auto_adjust=False,
-        actions=False,
-        progress=False,
-        threads=False,
-        timeout=8,
-        group_by="column"
-    )
-    close = _extract_intraday_close(raw, tickers)
-    rows = []
-    for symbol in tickers:
-        if symbol not in close.columns:
-            continue
-        series = close[symbol].dropna()
-        if series.empty:
-            continue
-        rows.append({
-            "symbol": symbol,
-            "price": float(series.iloc[-1]),
-            "timestamp": series.index[-1],
-            "source": "Yahoo 15m"
-        })
-    if not rows:
-        raise RuntimeError("Yahoo 盘前/日内快照为空")
-    return pd.DataFrame(rows).set_index("symbol")
-
-@st.cache_data(ttl=INTRADAY_TTL_SECONDS, show_spinner=False)
-def _fetch_intraday_snapshot_cached(session_name, trading_date):
-    frames = []
-    errors = []
-
-    try:
-        frames.append(_fetch_alpaca_etf_snapshot())
-    except Exception as exc:
-        errors.append(f"Alpaca: {exc}")
-
-    covered = set()
-    if frames:
-        covered.update(frames[0].index)
-    yahoo_tickers = [
-        symbol for symbol in INTRADAY_ETF_TICKERS
-        if symbol not in covered
-    ] + INTRADAY_VOL_TICKERS
-    if session_name == "regular":
-        yahoo_tickers.append("^NDX")
-
-    try:
-        frames.append(_fetch_yahoo_intraday_snapshot(yahoo_tickers))
-    except Exception as exc:
-        errors.append(f"Yahoo intraday: {exc}")
-
-    if frames:
-        snapshot = pd.concat(frames, axis=0)
-        snapshot = snapshot[~snapshot.index.duplicated(keep="first")]
-        snapshot["timestamp"] = pd.to_datetime(
-            snapshot["timestamp"], errors="coerce", utc=True
-        )
-        snapshot["price"] = pd.to_numeric(snapshot["price"], errors="coerce")
-        snapshot = snapshot.dropna(subset=["price", "timestamp"])
-
-        now_utc = pd.Timestamp.now(tz="UTC")
-        max_age_minutes = 45 if session_name == "regular" else 120
-        age = (now_utc - snapshot["timestamp"]).dt.total_seconds() / 60
-        snapshot = snapshot.loc[
-            (age >= -5) & (age <= max_age_minutes)
-        ].copy()
-        if not snapshot.empty:
-            _write_intraday_cache(snapshot)
-            return snapshot
-
-    cached = _read_intraday_cache(max_age_minutes=90)
-    if not cached.empty:
-        return cached
-    raise RuntimeError(
-        "盘前/日内快照不可用: " + " | ".join(errors[-3:])
-    )
-
-def fetch_intraday_snapshot():
-    session_info = get_market_session()
-    if not session_info["active"]:
-        return pd.DataFrame()
-    try:
-        return _fetch_intraday_snapshot_cached(
-            session_info["session"],
-            session_info["now_et"].date().isoformat()
-        )
-    except Exception:
-        return pd.DataFrame()
-
-def overlay_intraday_prices(daily_frame, symbols, require_all=False):
-    if daily_frame is None or daily_frame.empty:
-        return daily_frame
-    snapshot = fetch_intraday_snapshot()
-    available = [symbol for symbol in symbols if symbol in snapshot.index]
-    if require_all and len(available) != len(symbols):
-        result = daily_frame.copy()
-        result.attrs.update(daily_frame.attrs)
-        result.attrs["quote_mode"] = "daily_fallback"
-        return result
-    if not available:
-        result = daily_frame.copy()
-        result.attrs.update(daily_frame.attrs)
-        result.attrs["quote_mode"] = "daily_fallback"
-        return result
-
-    result = daily_frame.copy()
-    original_attrs = dict(daily_frame.attrs)
-    for symbol in available:
-        timestamp = pd.Timestamp(snapshot.loc[symbol, "timestamp"])
-        trading_date = pd.Timestamp(
-            timestamp.tz_convert(US_EASTERN).date()
-        )
-        if symbol not in result.columns:
-            result[symbol] = np.nan
-        result.loc[trading_date, symbol] = float(snapshot.loc[symbol, "price"])
-
-    result = result.sort_index().ffill()
-    result.attrs.update(original_attrs)
-    latest_timestamp = snapshot.loc[available, "timestamp"].max()
-    age_minutes = (
-        pd.Timestamp.now(tz="UTC") - latest_timestamp
-    ).total_seconds() / 60
-    result.attrs.update({
-        "quote_mode": get_market_session()["session"],
-        "intraday_asof": latest_timestamp.isoformat(),
-        "quote_age_minutes": max(0, round(age_minutes, 1)),
-        "quote_sources": ", ".join(
-            sorted(set(snapshot.loc[available, "source"].astype(str)))
-        ),
-        "intraday_symbols": available
-    })
-    return result
-
-def market_data_timestamp(frame):
-    if frame is not None and frame.attrs.get("intraday_asof"):
-        timestamp = pd.Timestamp(frame.attrs["intraday_asof"])
-        return timestamp.tz_convert(US_EASTERN).strftime(
-            "%Y-%m-%d %H:%M ET"
-        )
-    if frame is not None and not frame.empty:
-        return pd.Timestamp(frame.index[-1]).strftime("%Y-%m-%d") + " 日线"
-    return "无可用时间戳"
-
-def _request_json_with_backoff(url, params=None, attempts=3):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36"
-    }
-    last_error = None
-    for attempt in range(attempts):
-        try:
-            response = requests.get(
-                url, params=params, headers=headers, timeout=12
-            )
-            if response.status_code == 429:
-                retry_after = response.headers.get("Retry-After")
-                wait_seconds = float(retry_after) if retry_after else 2 ** (attempt + 1)
-                raise RuntimeError(f"HTTP 429，建议等待 {wait_seconds:.0f} 秒")
-            response.raise_for_status()
-            payload = response.json()
-            if payload.get("code") not in (None, "0"):
-                raise RuntimeError(payload.get("msg") or f"API code={payload.get('code')}")
-            return payload
-        except Exception as exc:
-            last_error = exc
-            if attempt < attempts - 1:
-                time.sleep(2 ** (attempt + 1))
-    raise RuntimeError(f"API 请求失败: {last_error}")
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def fetch_okx_signal_inputs():
-    """一次成功后缓存 30 分钟；异常直接抛出，因此临时失败不会被缓存。"""
-    price = _request_json_with_backoff(
-        "https://www.okx.com/api/v5/market/history-candles",
-        params={"instId": "BTC-USDT", "bar": "1Dutc", "limit": "60"}
-    )
-    oi = _request_json_with_backoff(
-        "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume",
-        params={"ccy": "BTC", "period": "1D"}
-    )
-    funding = _request_json_with_backoff(
-        "https://www.okx.com/api/v5/public/funding-rate-history",
-        params={"instId": "BTC-USDT-SWAP", "limit": "100"}
-    )
-    return price, oi, funding
 
 RISK_SCORE_MAP = {
     "极高风险": 100,
@@ -744,19 +149,13 @@ def enrich_switch(s):
     })
     return enriched
 
+@st.cache_data(ttl=3600)
 def fetch_vix_data():
     try:
-        close_data = pd.concat(
-            {
-                '^VIX': fetch_cboe_official_history('VIX'),
-                '^VIX3M': fetch_cboe_official_history('VIX3M')
-            },
-            axis=1
-        ).sort_index().ffill().dropna().tail(90)
-        close_data = overlay_intraday_prices(
-            close_data, ['^VIX', '^VIX3M'], require_all=True
-        ).tail(90)
-        if not close_data.empty:
+        tickers = yf.Tickers('^VIX ^VIX3M')
+        hist = tickers.history(period='3mo')  
+        if not hist.empty and 'Close' in hist.columns:
+            close_data = hist['Close'].ffill().copy()
             close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
             
             # 【新增】引入微观快线(EMA5)与趋势慢线(EMA21)作为期限结构比率的动能依据
@@ -862,35 +261,29 @@ def fetch_vix_data():
                 "vix_ratio_diag": vix_ratio_diag,
                 "vix_spot_diag": vix_spot_diag,
                 "df": close_data.tail(60),
-                "fetched_at": market_data_timestamp(close_data),
-                "quote_mode": close_data.attrs.get("quote_mode", "daily_fallback"),
-                "quote_age_minutes": close_data.attrs.get("quote_age_minutes"),
-                "quote_sources": close_data.attrs.get("quote_sources", "CBOE EOD")
+                "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
     except Exception as e:
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
     return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
 
+@st.cache_data(ttl=1800)
 def fetch_crypto_signals():
     try:
-        # BTC 价格、OI 与资金费率全部走 OKX 官方 API，彻底移除该开关的 Yahoo 依赖。
-        price_res, r_res, fr_res = fetch_okx_signal_inputs()
+        # 1. 价格数据：使用 yfinance 提取日线 (规避网络拦截，极度稳定)
+        btc_df = yf.Ticker('BTC-USD').history(period='45d')
+        if btc_df.empty:
+            raise Exception("YF 价格数据下载为空")
+        df_price = btc_df[['Close']].copy()
+        df_price.columns = ['close']
+        df_price.index = pd.to_datetime(df_price.index, utc=True).normalize()
 
-        if not price_res.get("data"):
-            raise Exception("OKX BTC 日线接口无返回数据")
-        price_data = []
-        for row in price_res['data']:
-            ts = pd.to_datetime(int(row[0]), unit='ms', utc=True).normalize()
-            price_data.append({'timestamp': ts, 'close': float(row[4])})
-        df_price = (
-            pd.DataFrame(price_data)
-            .drop_duplicates('timestamp', keep='last')
-            .set_index('timestamp')
-            .sort_index()
-        )
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
         # 2. 持仓量 (OI)：使用 OKX Rubik 历史接口
-        if not r_res.get("data"):
+        rubik_url = "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume?ccy=BTC&period=1D"
+        r_res = requests.get(rubik_url, headers=headers, timeout=5).json()
+        if r_res.get("code") != "0" or not r_res.get("data"):
             raise Exception(f"OKX OI 接口异常: {r_res.get('msg', '无返回数据')}")
             
         oi_data = []
@@ -901,7 +294,9 @@ def fetch_crypto_signals():
         df_oi = pd.DataFrame(oi_data).set_index('timestamp')
 
         # 3. 资金费率 (FR)：使用 OKX 历史资金费率接口
-        if not fr_res.get("data"):
+        fr_url = "https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP&limit=100"
+        fr_res = requests.get(fr_url, headers=headers, timeout=5).json()
+        if fr_res.get("code") != "0" or not fr_res.get("data"):
             raise Exception(f"OKX FR 接口异常: {fr_res.get('msg', '无返回数据')}")
             
         fr_data = []
@@ -980,9 +375,7 @@ def fetch_crypto_signals():
             "top_active": top_active, 
             "error": False,
             "hist_df": df_merged.tail(30), # 提供最近30天数据供图标渲染
-            "fetched_at": datetime.datetime.now(US_EASTERN).strftime(
-                '%Y-%m-%d %H:%M:%S ET'
-            )
+            "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     except Exception as e:
         # 捕获真实报错抛给前端
@@ -1042,82 +435,35 @@ def fetch_squeezemetrics_data():
     return {
         "dix": round(latest['dix'], 2), "gex": int(latest['gex']),
         "error": False, "df": mock_df, "is_mock": True,
-        "fetched_at": datetime.datetime.now(US_EASTERN).strftime(
-            '%Y-%m-%d %H:%M:%S ET'
-        ) + " (兜底)"
+        "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S') + " (兜底)"
     }
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_cboe_official_history_cached(symbol):
-    """
-    CBOE 官方 CSV 是 VIX/VIX3M/VXN/VVIX/COR1M/DSPX 的首选源。
-    只缓存成功数据；网络临时失败时使用最近 10 天内的最后成功快照。
-    """
-    cache_name = f"cboe_{symbol.upper()}.csv"
-    url = f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
-    last_error = None
-
-    for attempt in range(2):
-        try:
-            response = requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=15
-            )
-            if response.status_code == 429:
-                raise RuntimeError("CBOE HTTP 429")
-            response.raise_for_status()
-            df = pd.read_csv(io.StringIO(response.text))
-            df.columns = df.columns.str.strip().str.lower()
-            date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
-            value_col = 'close' if 'close' in df.columns else symbol.lower()
-            if date_col not in df.columns or value_col not in df.columns:
-                raise RuntimeError(f"CBOE {symbol} CSV 列结构变化")
-            result = pd.DataFrame({
-                symbol.upper(): pd.to_numeric(df[value_col], errors='coerce').values
-            }, index=pd.to_datetime(df[date_col], errors='coerce'))
-            result = (
-                result.loc[~result.index.isna()]
-                .dropna()
-                .sort_index()
-                .tail(800)
-            )
-            if result.shape[0] < 30:
-                raise RuntimeError(f"CBOE {symbol} 有效样本不足")
-            _write_frame_cache(result, cache_name)
-            return result.iloc[:, 0].rename(symbol.upper())
-        except Exception as exc:
-            last_error = exc
-            if attempt == 0:
-                time.sleep(2)
-
-    cached = _read_frame_cache(cache_name)
-    if not cached.empty:
-        return cached.iloc[:, 0].rename(symbol.upper())
-    raise RuntimeError(f"CBOE {symbol} 数据不可用: {last_error}")
-
+@st.cache_data(ttl=14400)
 def fetch_cboe_official_history(symbol):
     try:
-        return _fetch_cboe_official_history_cached(symbol)
+        url = f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        df = pd.read_csv(url)
+        df.columns = df.columns.str.lower()
+        date_col = 'trade_date' if 'trade_date' in df.columns else 'date'
+        df['date'] = pd.to_datetime(df[date_col])
+        df.set_index('date', inplace=True)
+        df = df.sort_index()
+        return df['close']
     except Exception:
-        # 包装层不缓存失败结果，下次 Streamlit 重跑仍可立即恢复。
-        return pd.Series(dtype=float, name=symbol.upper())
+        return pd.Series()
 
+@st.cache_data(ttl=3600)
 def calculate_quant_and_breadth_signals():
     try:
-        yf_data = fetch_yahoo_core_close()
-        required = ['QQQ', 'SPY', 'IWM', 'RSP']
-        yf_data = overlay_intraday_prices(
-            yf_data, required, require_all=True
-        )
-        missing = [
-            symbol for symbol in required
-            if symbol not in yf_data.columns or yf_data[symbol].dropna().shape[0] < 126
-        ]
-        if missing:
-            raise Exception(f"CTA 核心行情缺失: {', '.join(missing)}")
-        data = yf_data[required].dropna().tail(260).copy()
-        latest = data.iloc[-1]
+        raw_tickers = ['QQQ', 'SPY', 'IWM', 'RSP', '^COR1M', '^DSPX']
+        yf_tickers = filter_leveraged_etfs(raw_tickers)
+        
+        yf_data = yf.download(yf_tickers, period='1y', progress=False)['Close']
+        yf_data = yf_data.ffill()
+        latest = yf_data.iloc[-1]
+        
+        data = yf_data[['QQQ', 'SPY', 'IWM', 'RSP']].copy()
         
         corr_official = fetch_cboe_official_history('COR1M')
         dspx_official = fetch_cboe_official_history('DSPX')
@@ -1125,19 +471,18 @@ def calculate_quant_and_breadth_signals():
         if not corr_official.empty:
             corr_series = corr_official.reindex(data.index)
             if np.isnan(corr_series.iloc[-1]) or corr_series.tail(10).max() == corr_series.tail(10).min():
-                corr_series.iloc[-1] = corr_series.dropna().iloc[-1] if not corr_series.dropna().empty else 17.8
+                corr_series.iloc[-1] = latest.get('^COR1M', corr_series.dropna().iloc[-1] if not corr_series.dropna().empty else 17.8)
             corr_series = corr_series.ffill()
         else:
-            # 保留 CTA 开关运行，相关性开关会因常数序列自动标记为数据断层。
-            corr_series = pd.Series(17.8, index=data.index, name='COR1M')
+            corr_series = yf_data['^COR1M']
             
         if not dspx_official.empty:
             dspx_series = dspx_official.reindex(data.index)
             if np.isnan(dspx_series.iloc[-1]):
-                dspx_series.iloc[-1] = dspx_series.dropna().iloc[-1] if not dspx_series.dropna().empty else 40.0
+                dspx_series.iloc[-1] = latest.get('^DSPX', dspx_series.dropna().iloc[-1] if not dspx_series.dropna().empty else 40.0)
             dspx_series = dspx_series.ffill()
         else:
-            dspx_series = pd.Series(40.0, index=data.index, name='DSPX')
+            dspx_series = yf_data['^DSPX']
 
         # CTA 动向追踪
         cta_shorts_series = pd.Series(0, index=data.index)
@@ -1269,13 +614,7 @@ def calculate_quant_and_breadth_signals():
             "combined_diag": combined_diag,  
             "corr_risk_level": corr_risk_level,
             "corr_risk_diag": corr_risk_diag,
-            "df_hist": df_hist.tail(60),
-            "data_source": yf_data.attrs.get("data_source", "live_market_sources"),
-            "cache_age_hours": yf_data.attrs.get("cache_age_hours", 0.0),
-            "fetched_at": market_data_timestamp(yf_data),
-            "quote_mode": yf_data.attrs.get("quote_mode", "daily_fallback"),
-            "quote_age_minutes": yf_data.attrs.get("quote_age_minutes"),
-            "quote_sources": yf_data.attrs.get("quote_sources", "日线历史源")
+            "df_hist": df_hist.tail(60)
         }
     except Exception as e:
         return {
@@ -1285,20 +624,14 @@ def calculate_quant_and_breadth_signals():
             "corr_diag": "诊断异常", "disp_diag": "诊断异常", "combined_diag": "诊断异常"
         }
         
+@st.cache_data(ttl=3600)
 def fetch_vxn_vix_data():
     try:
-        df = pd.concat(
-            {
-                '^VXN': fetch_cboe_official_history('VXN'),
-                '^VIX': fetch_cboe_official_history('VIX')
-            },
-            axis=1
-        ).sort_index().ffill().dropna().tail(90)
-        df = overlay_intraday_prices(
-            df, ['^VXN', '^VIX'], require_all=True
-        ).tail(90)
+        tickers = yf.Tickers('^VXN ^VIX')
+        hist = tickers.history(period='3mo')
         
-        if not df.empty:
+        if not hist.empty and 'Close' in hist.columns:
+            df = hist['Close'].ffill().copy()
             
             df['Spread'] = df['^VXN'] - df['^VIX']
             df['Ratio'] = df['^VXN'] / df['^VIX']
@@ -1365,61 +698,24 @@ def fetch_vxn_vix_data():
                 "spread_diag": spread_diag,
                 "ratio_diag": ratio_diag,
                 "df_hist": df,
-                "fetched_at": market_data_timestamp(df),
-                "quote_mode": df.attrs.get("quote_mode", "daily_fallback"),
-                "quote_age_minutes": df.attrs.get("quote_age_minutes"),
-                "quote_sources": df.attrs.get("quote_sources", "CBOE EOD")
+                "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
     except Exception as e:
         return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常断流"}
     return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
 
+@st.cache_data(ttl=1800)
 def fetch_macro_liquidity_overlay():
     try:
-        frames = []
-        source_notes = []
-        macro_quote_meta = {}
-        try:
-            yahoo_data = fetch_yahoo_core_close()
-            yahoo_data = overlay_intraday_prices(
-                yahoo_data, ['HYG', 'LQD'], require_all=True
-            )
-            macro_quote_meta = {
-                "quote_mode": yahoo_data.attrs.get("quote_mode", "daily_fallback"),
-                "quote_age_minutes": yahoo_data.attrs.get("quote_age_minutes"),
-                "quote_sources": yahoo_data.attrs.get("quote_sources", "日线历史源"),
-                "fetched_at": market_data_timestamp(yahoo_data)
-            }
-            if macro_quote_meta["quote_mode"] != "daily_fallback":
-                source_notes.append(
-                    "HYG/LQD使用盘前/日内快照；MOVE/VVIX仍按官方盘后日线"
-                )
-            if yahoo_data.attrs.get("data_source") == "last_success_cache":
-                source_notes.append(
-                    f"Yahoo实时限流，使用最近成功缓存 "
-                    f"({yahoo_data.attrs.get('cache_age_hours', '?')}小时前)"
-                )
-            yahoo_cols = [
-                symbol for symbol in ['^MOVE', 'HYG', 'LQD']
-                if symbol in yahoo_data.columns
-            ]
-            if yahoo_cols:
-                frames.append(yahoo_data[yahoo_cols].tail(130))
-        except Exception as exc:
-            source_notes.append(f"Yahoo子集暂不可用: {exc}")
-
-        vvix = fetch_cboe_official_history('VVIX')
-        if not vvix.empty:
-            frames.append(vvix.rename('^VVIX').to_frame().tail(130))
-
-        raw = pd.concat(frames, axis=1).sort_index().ffill() if frames else pd.DataFrame()
+        tickers = ['^MOVE', '^VVIX', 'HYG', 'LQD']
+        raw = yf.download(tickers, period='6mo', progress=False)['Close'].ffill()
         if raw.empty:
             raise Exception("宏观补充数据为空")
 
         available_cols = set(raw.columns)
         risk_points = 0
         opportunity_points = 0
-        details = source_notes
+        details = []
 
         if '^MOVE' in available_cols and raw['^MOVE'].dropna().shape[0] >= 30:
             move = raw['^MOVE'].dropna()
@@ -1479,12 +775,7 @@ def fetch_macro_liquidity_overlay():
             "risk_points": risk_points,
             "opportunity_points": opportunity_points,
             "net_adjustment": net_adjustment,
-            "fetched_at": macro_quote_meta.get(
-                "fetched_at", market_data_timestamp(raw)
-            ),
-            "quote_mode": macro_quote_meta.get("quote_mode", "daily_fallback"),
-            "quote_age_minutes": macro_quote_meta.get("quote_age_minutes"),
-            "quote_sources": macro_quote_meta.get("quote_sources", "日线历史源")
+            "fetched_at": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     except Exception as e:
         return {
@@ -1501,77 +792,14 @@ def fetch_macro_liquidity_overlay():
 # -----------------------------------------------------------------------------
 # 3. 业务决策逻辑组装与元数据解析
 # -----------------------------------------------------------------------------
-market_session = get_market_session()
-alpaca_configured = bool(
-    _get_config_value("ALPACA_API_KEY")
-    and _get_config_value("ALPACA_API_SECRET")
-)
-auto_refresh_seconds = (
-    INTRADAY_TTL_SECONDS if alpaca_configured else 15 * 60
-)
-st.sidebar.markdown("### ⏱️ 盘前 / 日内行情")
-st.sidebar.caption(
-    f"当前：{market_session['label']} · "
-    f"{market_session['now_et'].strftime('%Y-%m-%d %H:%M ET')}"
-)
-auto_refresh = st.sidebar.checkbox(
-    f"交易时段每 {auto_refresh_seconds // 60} 分钟自动刷新",
-    value=True,
-    help="只在美东 04:00–20:00 的工作日启用；历史日线仍使用长缓存。"
-)
-if st.sidebar.button("🔄 立即刷新最新快照"):
-    _fetch_intraday_snapshot_cached.clear()
-
-if market_session["active"] and auto_refresh:
-    components.html(
-        f"""
-        <script>
-        window.setTimeout(function() {{
-            window.parent.location.reload();
-        }}, {auto_refresh_seconds * 1000});
-        </script>
-        """,
-        height=0
-    )
-
 vix_data = fetch_vix_data()
 crypto_data = fetch_crypto_signals()
 sm_data = fetch_squeezemetrics_data()
 quant_data = calculate_quant_and_breadth_signals()
 macro_data = fetch_macro_liquidity_overlay()
 
-now_str = datetime.datetime.now(US_EASTERN).strftime('%Y-%m-%d %H:%M ET')
+now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 vxn_vix_data = fetch_vxn_vix_data()
-
-intraday_snapshot = fetch_intraday_snapshot()
-if market_session["active"]:
-    if not intraday_snapshot.empty:
-        latest_snapshot_at = intraday_snapshot["timestamp"].max()
-        latest_snapshot_et = latest_snapshot_at.tz_convert(US_EASTERN)
-        snapshot_age = max(
-            0,
-            (
-                pd.Timestamp.now(tz="UTC") - latest_snapshot_at
-            ).total_seconds() / 60
-        )
-        source_text = ", ".join(
-            sorted(set(intraday_snapshot["source"].astype(str)))
-        )
-        st.sidebar.success(
-            f"最新快照：{latest_snapshot_et.strftime('%H:%M ET')} "
-            f"({snapshot_age:.0f} 分钟前)\n\n{source_text}"
-        )
-    else:
-        st.sidebar.warning(
-            "最新快照暂不可用，模型已自动退回最近日线；不会把旧数据伪装成实时。"
-        )
-else:
-    st.sidebar.info("当前休市，停止轮询并使用最近有效收盘数据。")
-
-if not alpaca_configured:
-    st.sidebar.caption(
-        "未配置 Alpaca：ETF 使用 Yahoo 15分钟线，并将自动刷新降为15分钟以降低限流风险。"
-    )
 
 def classify_sm_gex_dix_risk(gex_val, dix_val):
     gex_abs = abs(gex_val)
@@ -1726,37 +954,6 @@ cta_profile = classify_cta_profile(quant_data)
 corr_profile = classify_corr_profile(quant_data)
 vxn_profile = classify_vxn_profile(vxn_vix_data)
 
-def quote_freshness_note(data):
-    if data.get("error"):
-        return ""
-    mode = data.get("quote_mode", "daily_fallback")
-    if mode == "daily_fallback":
-        return (
-            "<br><span style='font-size:8pt;color:#d68910;'>"
-            "⏳ 当前未取得有效盘前/日内快照，使用最近收盘日线。"
-            "</span>"
-        )
-    age = data.get("quote_age_minutes")
-    age_text = f"{age:.0f}分钟" if isinstance(age, (int, float)) else "未知时长"
-    source = data.get("quote_sources", "盘前/日内源")
-    return (
-        "<br><span style='font-size:8pt;color:#1e8449;'>"
-        f"● {get_market_session()['label']}快照 · {age_text}前 · {source}"
-        "</span>"
-    )
-
-vix_freshness_note = quote_freshness_note(vix_data)
-quant_freshness_note = quote_freshness_note(quant_data)
-vxn_freshness_note = quote_freshness_note(vxn_vix_data)
-
-quant_cache_note = ""
-if quant_data.get("data_source") == "last_success_cache":
-    quant_cache_note = (
-        f"<br><span style='font-size:8pt;color:#d68910;'>"
-        f"Yahoo 实时限流，当前使用 {quant_data.get('cache_age_hours', '?')} 小时前的成功缓存。"
-        f"</span>"
-    )
-
 switches = [
     {
         "id": 1,
@@ -1778,7 +975,7 @@ switches = [
         "desc_top": "【高风险预警】① GEX<0 且 DIX<40 为极高风险；② GEX<0 且 DIX<42.5、或 GEX>=0 但 DIX<40 为高风险；③ GEX<-10亿 即使 DIX吸筹也按高风险处理。所有高风险/极高风险均触发红色预警。",
         "fetched_status": sm_status,
         "update_cycle": "每日更新 (美东盘后)",
-        "last_updated": sm_data.get("fetched_at", now_str)
+        "last_updated": now_str
     },
     {
             "id": 2,
@@ -1795,17 +992,16 @@ switches = [
             "bottom_active": vix_data["bottom_active"] if not vix_data["error"] else False,
             "top_active": vix_data["top_active"] if not vix_data["error"] else False,
             "value": f"今日比率: {vix_data.get('ratio', 'N/A')} | EMA5/21状态: {'快线上穿/多头' if vix_data['bottom_active'] else '死叉/发散'} | VIX现货: {vix_data.get('vix', 'N/A')}",
-            "source": "CBOE 日线骨架 ✖ Yahoo 15分钟波动率快照",
+            "source": "CBOE 波动率期限结构交叉矩阵",
             "desc_bottom": "【双向修复抄底标准】当隐含波动率比率向上收复突破 1.0 平衡线（摆脱远期深度倒挂状态），或者在低位倒挂修复带(<=1.05)确立微观动能均线金叉（EMA5 > EMA21）时激活。这标志着全市场非理性非对称抛售流动性枯竭，买盘筹码右侧转折确立，转入高胜率抄底期。",
             "desc_top": "【三维立体逃顶标准】满足以下任一核心条件立即拉响风控防御：①比率冲破 1.25 绝对贪婪上限，期权空头无防备极度拥挤；②比率跌破 1.0 平衡线，长短期期限结构倒挂、牛市基石全面动摇；③比率在高位自满警戒带(>=1.15)发生了 EMA5 下穿 EMA21 死叉，显示做多边际买盘已经枯竭见顶。",
             "fetched_status": "数据抓取失败 🔴" if vix_data["error"] else (
                 f"<b>当下状态：</b>{vix_data.get('vix_diag_status')}<br>"
                 f"<b>⚖️ 比率动能分项：</b>{vix_data.get('vix_ratio_diag')}<br>"
                 f"<b>📊 现货波动分项：</b>{vix_data.get('vix_spot_diag')}"
-                f"{vix_freshness_note}"
             ),
-            "update_cycle": "10–15分钟快照；CBOE日线兜底",
-            "last_updated": vix_data.get("fetched_at", now_str)
+            "update_cycle": "盘中实时波动 (YF延迟)",
+            "last_updated": now_str
         },
     {
         "id": 3,
@@ -1822,14 +1018,14 @@ switches = [
         "bottom_active": crypto_data["bottom_active"] if not crypto_data["error"] else False,
         "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
         "value": f"BTC现货: {crypto_data.get('btc_price', 'N/A')} ({crypto_data.get('price_trend', '')}) | OI: {crypto_data.get('oi', 'N/A')} ({crypto_data.get('oi_trend', '')}) | 费率: {crypto_data.get('funding_rate', 'N/A')}",
-        "source": "OKX 官方 API (BTC K线 ✖ OI ✖ 资金费率)",
+        "source": "Yahoo Finance (K线) ✖ OKX 永续合约实时 API (OI与资金费率)",
         "desc_bottom": "【缩量爆仓抄底】当 **价格下跌 + OI显著下降 + 费率转负**。代表做多杠杆被彻底清算，市场流动性恐慌见底，是高胜率左侧或右侧建仓点。",
         "desc_top": "【拥挤过载逃顶】触发两种情况立即防御：① **价格上涨 + OI上升 + 费率极高** (多头拥挤，极易被爆)；② **价格上涨 + OI下降** (缺乏新资金的假突破)。",
         "fetched_status": f"数据抓取失败 🔴 <br><span style='font-size:8pt;color:#e74c3c;'>异常原因: {crypto_data.get('msg', '未知断流')}</span>" if crypto_data["error"] else (
             f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#2c3e50;'>{crypto_data.get('diag_status')}</div>"
         ),
         "update_cycle": "日线级别清洗 ✖ 盘中实时快照",
-        "last_updated": crypto_data.get("fetched_at", now_str)
+        "last_updated": now_str
     },
     {
         "id": 4,
@@ -1846,18 +1042,16 @@ switches = [
         "bottom_active": quant_data["cta_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["cta_top_active"] if not quant_data["error"] else False,
         "value": f"当前状态: {quant_data.get('cta_status', 'N/A')}",
-        "source": "历史日线 ✖ Alpaca/Yahoo ETF 快照 ✖ 1M/3M/6M 动量",
+        "source": "基于 1M/3M/6M 动量偏离度演算",
         "desc_bottom": "主跌浪贯穿多周期均线且负乖离达极限。量化 CTA 的约跟空抛压面临彻底耗尽。",
         "desc_top": "趋势基金无脑买入的边际力量全面满仓，正乖离达极限，市场缺乏后续增量买家。",
         "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
-            (
-                "🚨 警报：系统性买盘进入衰竭点" if quant_data["cta_top_active"] else (
-                    "🟢 激活：系统性空头抛压触底耗尽" if quant_data["cta_bottom_active"] else f"⚪ 运行中：{quant_data.get('cta_status')}"
-                )
-            ) + quant_cache_note + quant_freshness_note
+            "🚨 警报：系统性买盘进入衰竭点" if quant_data["cta_top_active"] else (
+                "🟢 激活：系统性空头抛压触底耗尽" if quant_data["cta_bottom_active"] else f"⚪ 运行中：{quant_data.get('cta_status')}"
+            )
         ),
-        "update_cycle": "盘前/盘中10–15分钟ETF快照",
-        "last_updated": quant_data.get("fetched_at", now_str)
+        "update_cycle": "盘中动态计算 (基于最新价)",
+        "last_updated": now_str
     },
     {
         "id": 5,
@@ -1874,7 +1068,7 @@ switches = [
         "bottom_active": quant_data["corr_bottom_active"] if not quant_data["error"] else False,
         "top_active": quant_data["breadth_top_active"] if not quant_data["error"] else False,
         "value": f"{quant_data.get('cboe_corr', 'N/A')} | {quant_data.get('cboe_disp', 'N/A')}",
-        "source": "CBOE COR1M/DSPX 日线 ✖ SPY/RSP 日内快照",
+        "source": "CBOE COR1M / DSPX 联动矩阵 (微观导数交叉 ✖ 滚动Z-Score状态机)",
         "desc_bottom": "【抄底激活：恐慌死叉✖撕裂收敛】当相关性极值冲顶后向下死叉确立（恐慌抛售衰退），且离散度未出现背离爆发时激活。此时大盘无差别抛压清空，回归估值红利期。",
         "desc_top": "【风险等级预警】象限 I（相关性升温+离散度发散）按高风险预警；象限 III（相关性退潮+离散度发散）按高风险，若指数高位或相关性极低升级为极高风险；所有高风险/极高风险均触发红色预警。",
         "fetched_status": "数据抓取失败 🔴" if quant_data["error"] else (
@@ -1882,11 +1076,9 @@ switches = [
             f"<b>🧯 风险等级：</b>{quant_data.get('corr_risk_level', '无信息')} - {quant_data.get('corr_risk_diag', '无信息')}<br>"
             f"<b>📊 相关性微观动能：</b>{quant_data.get('corr_diag', '无信息')}<br>"
             f"<b>📉 离散度微观动能：</b>{quant_data.get('disp_diag', '无信息')}"
-            f"{quant_cache_note}"
-            f"{quant_freshness_note}"
         ),
-        "update_cycle": "CBOE日线 + ETF 10–15分钟快照",
-        "last_updated": quant_data.get("fetched_at", now_str)
+        "update_cycle": "每日更新 (盘终结算)",
+        "last_updated": now_str
     },
     {
         "id": 6,
@@ -1903,17 +1095,16 @@ switches = [
         "bottom_active": vxn_vix_data["bottom_active"] if not vxn_vix_data["error"] else False,
         "top_active": vxn_vix_data["top_active"] if not vxn_vix_data["error"] else False,
         "value": f"Spread: {vxn_vix_data.get('current_spread', 'N/A')} | Ratio: {vxn_vix_data.get('current_ratio', 'N/A')} | 熔断风控实时检测",
-        "source": "CBOE 日线骨架 ✖ Yahoo 15分钟 VXN/VIX 快照",
+        "source": "CBOE 波动率剪刀差 & EMA 一阶导数交叉",
         "desc_bottom": "【右侧出击】当剪刀差自高位（>8.0）回落，且微观动能死叉（EMA5 < EMA21）时激活。此时非对称踩踏结束，IV Crush 来临，是高弹性科技股胜率极高的反转买点。",
         "desc_top": "【双重风控防御】① 火山口（单边踩踏）：极高位金叉发散，无条件熔断科技股多头；② 暴风雨前夜（隐性筑顶）：低位自满区间突发金叉，主力悄然买入 Put，需立刻收紧止盈或做空保护。",
         "fetched_status": "数据抓取失败 🔴" if vxn_vix_data["error"] else (
             f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#d35400;'>{vxn_vix_data.get('combined_diag', '无信息')}</div>"
             f"<b>📊 微观动能：</b>{vxn_vix_data.get('spread_diag', '无信息')}<br>"
             f"<b>📉 情绪象限：</b>{vxn_vix_data.get('ratio_diag', '无信息')}"
-            f"{vxn_freshness_note}"
         ),
-        "update_cycle": "10–15分钟快照；CBOE日线兜底",
-        "last_updated": vxn_vix_data.get("fetched_at", now_str)
+        "update_cycle": "盘中实时波动 (YF延迟)",
+        "last_updated": now_str
     }
 ]
 
@@ -1980,10 +1171,7 @@ else:
 # 4. Streamlit UI 界面绘制
 # -----------------------------------------------------------------------------
 st.title("🛡️ Sentinel 2.0 核心决策系统：大盘底层资金双向雷达")
-st.subheader(
-    f"看板渲染时钟: "
-    f"{datetime.datetime.now(US_EASTERN).strftime('%Y-%m-%d %H:%M:%S ET')}"
-)
+st.subheader(f"看板渲染时钟: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 st.markdown(f"""
 <div style="padding:15px; border-radius:8px; border-left: 6px solid {status_color}; background-color:#fafafa; margin-bottom:20px;">
@@ -1991,9 +1179,7 @@ st.markdown(f"""
     <p style="font-size:11pt; line-height:1.6; color:#333;">{action_text}</p>
     <p style="font-size:9pt; line-height:1.45; color:#555; margin:8px 0 0 0;">
         <b>重要性排序:</b> {ranking_line}<br>
-        <b>宏观补充:</b> {macro_data.get('status', '无信息')} {macro_data.get('details', '')}<br>
-        <b>宏观行情时间:</b> {macro_data.get('fetched_at', '未知')} ·
-        {macro_data.get('quote_sources', '日线历史源')}
+        <b>宏观补充:</b> {macro_data.get('status', '无信息')} {macro_data.get('details', '')}
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -2061,26 +1247,15 @@ for i, s in enumerate(switches):
 # -----------------------------------------------------------------------------
 st.markdown("### 🗺️ 纳指 100 (NDX) 承接区间与走势雷达引擎")
 
+@st.cache_data(ttl=1800)
 def fetch_ndx_chart_data():
-    try:
-        close = fetch_yahoo_core_close()
-        if '^NDX' not in close.columns:
-            return pd.DataFrame()
-        close = overlay_intraday_prices(close, ['^NDX'])
-        return (
-            close[['^NDX']]
-            .dropna()
-            .tail(66)
-            .rename(columns={'^NDX': 'Close'})
-        )
-    except Exception:
-        return pd.DataFrame()
+    df = yf.Ticker('^NDX').history(period='3mo')
+    return df
 
 ndx_data = fetch_ndx_chart_data()
 if not ndx_data.empty:
     fig_ndx = go.Figure()
     latest_ndx_close = float(ndx_data['Close'].iloc[-1])
-    ndx_time_label = market_data_timestamp(ndx_data)
     
     fig_ndx.add_trace(go.Scatter(
         x=ndx_data.index, y=ndx_data['Close'], mode='lines', name='NDX 实际走势曲线', line=dict(color='#2980b9', width=2.5)
@@ -2088,8 +1263,7 @@ if not ndx_data.empty:
     
     fig_ndx.add_hline(
         y=latest_ndx_close, line_dash="solid", line_color="#2c3e50", 
-        annotation_text=f"最新有效位 ({latest_ndx_close:,.2f}) · {ndx_time_label}",
-        annotation_position="top right"
+        annotation_text=f"动态实时收盘位 ({latest_ndx_close:,.2f})", annotation_position="top right"
     )
     
     fig_ndx.add_hline(y=28500, line_dash="dash", line_color="#e74c3c", annotation_text="CTA 二次抛售加速位 (28,500)", annotation_position="bottom right")
