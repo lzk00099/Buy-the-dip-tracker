@@ -140,13 +140,16 @@ def record_model_score_snapshot(risk_score, opportunity_score, macro_score, net_
     path = _market_cache_path(MODEL_SCORE_HISTORY_FILE)
     columns = [
         "timestamp", "weighted_risk", "weighted_opportunity",
-        "macro_adjustment", "net_risk"
+        "macro_adjustment", "net_risk", "origin"
     ]
     try:
         if os.path.exists(path):
             history = pd.read_csv(path)
         else:
             history = pd.DataFrame(columns=columns)
+        if "origin" not in history.columns:
+            # 兼容此前已写入的记录：这些都是应用当日真实输出。
+            history["origin"] = "真实模型记录"
         history = history.reindex(columns=columns)
         history["timestamp"] = pd.to_datetime(
             history["timestamp"], errors="coerce", utc=True
@@ -166,7 +169,8 @@ def record_model_score_snapshot(risk_score, opportunity_score, macro_score, net_
             "weighted_risk": round(float(risk_score), 3),
             "weighted_opportunity": round(float(opportunity_score), 3),
             "macro_adjustment": round(float(macro_score), 3),
-            "net_risk": round(float(net_risk_score), 3)
+            "net_risk": round(float(net_risk_score), 3),
+            "origin": "真实模型记录"
         }])
         history = pd.concat([history, row], ignore_index=True)
         history = (
@@ -267,7 +271,7 @@ def _download_nasdaq_history_symbol(symbol):
     today = datetime.date.today()
     params = {
         "assetclass": asset_class,
-        "fromdate": (today - datetime.timedelta(days=370)).isoformat(),
+        "fromdate": (today - datetime.timedelta(days=760)).isoformat(),
         "todate": today.isoformat(),
         "limit": "5000"
     }
@@ -336,7 +340,7 @@ def fetch_yahoo_core_close():
     try:
         raw = yf.download(
             YAHOO_CORE_TICKERS,
-            period='1y',
+            period='2y',
             interval='1d',
             auto_adjust=False,
             actions=False,
@@ -1784,6 +1788,177 @@ def fetch_macro_liquidity_overlay():
             "fetched_at": "异常断流"
         }
     
+def build_historical_daily_replay(sm_data):
+    """Rebuild prior daily model states from the same end-of-day inputs.
+
+    This deliberately excludes unavailable intraday quotes.  The crypto input
+    is held at its neutral score when its full historical OI/funding alignment
+    is not available, rather than inventing a history for it.
+    """
+    def daily_series(series, name):
+        result = series.copy().rename(name)
+        result.index = pd.to_datetime(result.index).tz_localize(None).normalize()
+        return result
+
+    try:
+        market = fetch_yahoo_core_close()
+        required = ['QQQ', 'SPY', 'IWM', 'RSP', 'HYG', 'LQD']
+        if any(col not in market.columns for col in required):
+            return pd.DataFrame()
+
+        parts = [daily_series(market[col].dropna(), col) for col in required]
+        if '^MOVE' in market.columns:
+            parts.append(daily_series(market['^MOVE'].dropna(), 'MOVE'))
+        for symbol in ('VIX', 'VIX3M', 'VXN', 'VVIX', 'COR1M', 'DSPX'):
+            series = fetch_cboe_official_history(symbol)
+            if not series.empty:
+                parts.append(daily_series(series.dropna(), symbol))
+
+        data = pd.concat(parts, axis=1).sort_index().ffill()
+        required_columns = ['QQQ', 'SPY', 'IWM', 'RSP', 'VIX', 'VIX3M', 'VXN']
+        if any(col not in data.columns for col in required_columns):
+            return pd.DataFrame()
+        data = data.dropna(subset=required_columns)
+        if data.shape[0] < 130:
+            return pd.DataFrame()
+
+        # Switch 1: DIX/GEX has a short official history.  Missing older dates
+        # receive the model's neutral state, preserving an honest long history.
+        if sm_data and not sm_data.get('is_mock') and isinstance(sm_data.get('df'), pd.DataFrame):
+            sm = sm_data['df'].copy()
+            sm.columns = sm.columns.str.lower()
+            date_col = next((col for col in ('date', 'trade_date', 'timestamp') if col in sm.columns), None)
+            if date_col and {'dix', 'gex'}.issubset(sm.columns):
+                sm.index = pd.to_datetime(sm[date_col], errors='coerce').dt.tz_localize(None).dt.normalize()
+                sm = sm.loc[~sm.index.isna(), ['dix', 'gex']]
+                sm = sm.apply(pd.to_numeric, errors='coerce').groupby(level=0).last()
+                data = data.join(sm.reindex(data.index), how='left')
+
+        ratio = data['VIX3M'] / data['VIX']
+        ratio_fast, ratio_slow = ratio.ewm(span=5, adjust=False).mean(), ratio.ewm(span=21, adjust=False).mean()
+        vxn_spread = data['VXN'] - data['VIX']
+        vxn_ratio = data['VXN'] / data['VIX']
+        spread_fast = vxn_spread.ewm(span=5, adjust=False).mean()
+        spread_slow = vxn_spread.ewm(span=21, adjust=False).mean()
+
+        cta_short = pd.Series(0, index=data.index)
+        cta_long = pd.Series(0, index=data.index)
+        for symbol in ('QQQ', 'SPY', 'IWM'):
+            price = data[symbol]
+            ma21, ma63, ma126 = price.rolling(21).mean(), price.rolling(63).mean(), price.rolling(126).mean()
+            cta_short += ((price < ma21) & (price < ma63) & (price < ma126) & ((price - ma21) / ma21 < -0.04)).astype(int)
+            cta_long += ((price > ma21) & (price > ma63) & (price > ma126) & ((price - ma21) / ma21 > 0.04)).astype(int)
+
+        has_corr = {'COR1M', 'DSPX'}.issubset(data.columns)
+        if has_corr:
+            corr, dspx = data['COR1M'], data['DSPX']
+            corr_fast, corr_slow = corr.ewm(span=5, adjust=False).mean(), corr.ewm(span=21, adjust=False).mean()
+            dspx_fast, dspx_slow = dspx.ewm(span=5, adjust=False).mean(), dspx.ewm(span=21, adjust=False).mean()
+            corr_z = (corr - corr.rolling(60).mean()) / corr.rolling(60).std()
+            dspx_z = (dspx - dspx.rolling(60).mean()) / dspx.rolling(60).std()
+            corr_q75, corr_q25 = corr.rolling(126).quantile(.75), corr.rolling(126).quantile(.25)
+
+        replay_rows = []
+        weights = [1.25 * .74, 1.35 * .92, .72 * .92, .88 * .82, 1.18 * .82, 1.05 * .92]
+        for i in range(126, len(data)):
+            component_scores = []
+            # Switch 1: Gamma/DIX.
+            dix, gex = data['dix'].iloc[i] if 'dix' in data else np.nan, data['gex'].iloc[i] if 'gex' in data else np.nan
+            if pd.isna(dix) or pd.isna(gex):
+                component_scores.append((28, 0))
+            elif gex < 0 and dix < 40:
+                component_scores.append((100, 0))
+            elif (gex < 0 and dix < 42.5) or (gex >= 0 and dix < 40) or gex < -1_000_000_000:
+                component_scores.append((82, 0))
+            elif gex >= 0 and dix >= 45:
+                component_scores.append((12, 68))
+            elif gex < 0 and dix >= 45:
+                component_scores.append((66 if abs(gex) >= 1_000_000_000 else 48, 0))
+            else:
+                component_scores.append((28, 0))
+
+            # Switch 2: VIX term structure, identical daily rules to live mode.
+            r, prev_r, vix = ratio.iloc[i], ratio.iloc[i - 1], data['VIX'].iloc[i]
+            golden = ratio_fast.iloc[i - 1] <= ratio_slow.iloc[i - 1] and ratio_fast.iloc[i] > ratio_slow.iloc[i]
+            death = ratio_fast.iloc[i - 1] >= ratio_slow.iloc[i - 1] and ratio_fast.iloc[i] < ratio_slow.iloc[i]
+            bottom = (prev_r <= 1 and r > 1) or (golden and r <= 1.05)
+            top = r >= 1.25 or (prev_r >= 1 and r < 1) or (death and r >= 1.15)
+            if top and (r >= 1.25 or vix < 13.5): component_scores.append((96, 0))
+            elif top: component_scores.append((82, 0))
+            elif bottom and vix >= 24: component_scores.append((45, 90))
+            elif bottom: component_scores.append((30, 76))
+            elif r <= 1 or vix >= 24: component_scores.append((66, 22))
+            elif r >= 1.15 or vix < 13.5: component_scores.append((50, 0))
+            else: component_scores.append((20, 25))
+
+            # Switch 3: historical OI/funding can be incomplete; use its neutral state.
+            component_scores.append((32, 20))
+
+            # Switch 4: CTA momentum.
+            if cta_long.iloc[i] >= 2: component_scores.append((78, 0))
+            elif cta_short.iloc[i] >= 2: component_scores.append((44, 78))
+            elif cta_long.iloc[i] > 0 or cta_short.iloc[i] > 0: component_scores.append((45, 20))
+            else: component_scores.append((30, 25))
+
+            # Switch 5: correlation/dispersal.  Neutral only if CBOE history is unavailable.
+            if not has_corr or pd.isna(corr_z.iloc[i]) or pd.isna(dspx_z.iloc[i]):
+                component_scores.append((28, 18))
+            else:
+                c_high = corr_z.iloc[i] > 1 or corr_slow.iloc[i] > corr_q75.iloc[i]
+                c_low = corr_z.iloc[i] < -1 or corr_slow.iloc[i] < corr_q25.iloc[i]
+                d_high = dspx_z.iloc[i] > 1 or dspx_fast.iloc[i] > dspx_slow.iloc[i]
+                d_low = dspx_z.iloc[i] < -1 or dspx_fast.iloc[i] < dspx_slow.iloc[i]
+                c_golden, c_dead = corr_fast.iloc[i] > corr_slow.iloc[i], corr_fast.iloc[i] < corr_slow.iloc[i]
+                market_high = data['SPY'].iloc[i] > data['SPY'].rolling(50).mean().iloc[i]
+                corr_bottom = c_high and c_dead and not d_high
+                if c_golden and d_high: risk = 82
+                elif c_golden: risk = 66
+                elif c_dead and d_high: risk = 100 if (market_high or c_low) else 82
+                elif c_low and market_high: risk = 48
+                elif d_low and not c_low: risk = 18
+                else: risk = 28
+                if corr_bottom: component_scores.append((min(risk, 46), 80))
+                elif risk >= 82: component_scores.append((risk, 0))
+                elif risk == 18: component_scores.append((18, 28))
+                else: component_scores.append((risk, 18))
+
+            # Switch 6: VXN/VIX technology-volatility spread.
+            spread, xr = vxn_spread.iloc[i], vxn_ratio.iloc[i]
+            x_golden = spread_fast.iloc[i - 1] <= spread_slow.iloc[i - 1] and spread_fast.iloc[i] > spread_slow.iloc[i]
+            x_death = spread_fast.iloc[i - 1] >= spread_slow.iloc[i - 1] and spread_fast.iloc[i] < spread_slow.iloc[i]
+            x_bottom = x_death and vxn_spread.iloc[max(0, i - 4):i + 1].max() > 8 and vix < 35
+            x_top = ((spread > 7.5 or xr > 1.35) and spread_fast.iloc[i] > spread_slow.iloc[i]) or ((spread < 3 or xr < 1.10) and x_golden)
+            if x_top and (xr > 1.35 or spread > 7.5): component_scores.append((92, 0))
+            elif x_top: component_scores.append((78, 0))
+            elif x_bottom: component_scores.append((32, 78))
+            elif xr < 1.10 or spread < 3: component_scores.append((48, 0))
+            else: component_scores.append((24, 24))
+
+            risk_score = sum(score[0] * weight for score, weight in zip(component_scores, weights)) / sum(weights)
+            opportunity_score = sum(score[1] * weight for score, weight in zip(component_scores, weights)) / sum(weights)
+
+            macro = 0
+            if 'VVIX' in data and data['VVIX'].iloc[max(0, i - 59):i + 1].std() > 0:
+                vvix_z = (data['VVIX'].iloc[i] - data['VVIX'].iloc[i - 59:i + 1].mean()) / data['VVIX'].iloc[i - 59:i + 1].std()
+                macro += 8 if vvix_z >= 1.25 else (-3 if vvix_z <= -1 else 0)
+            if {'HYG', 'LQD'}.issubset(data.columns):
+                credit = (data['HYG'] / data['LQD']).iloc[:i + 1]
+                if len(credit) >= 60 and credit.iloc[-60:].std() > 0:
+                    credit_z = (credit.iloc[-1] - credit.iloc[-60:].mean()) / credit.iloc[-60:].std()
+                    if credit.ewm(span=5, adjust=False).mean().iloc[-1] < credit.ewm(span=21, adjust=False).mean().iloc[-1] and credit_z < -.7: macro += 7
+                    elif credit.ewm(span=5, adjust=False).mean().iloc[-1] > credit.ewm(span=21, adjust=False).mean().iloc[-1] and credit_z > 0: macro -= 4
+            replay_rows.append({
+                'timestamp': pd.Timestamp(data.index[i]).tz_localize(US_EASTERN).tz_convert('UTC'),
+                'weighted_risk': round(risk_score, 3),
+                'weighted_opportunity': round(opportunity_score, 3),
+                'macro_adjustment': round(macro, 3),
+                'net_risk': round(risk_score - opportunity_score + macro, 3),
+                'origin': 'daily_replay'
+            })
+        return pd.DataFrame(replay_rows).tail(MODEL_SCORE_HISTORY_DAYS)
+    except Exception:
+        return pd.DataFrame()
+
 # -----------------------------------------------------------------------------
 # 3. 业务决策逻辑组装与元数据解析
 # -----------------------------------------------------------------------------
@@ -2235,6 +2410,15 @@ model_score_history = record_model_score_snapshot(
     macro_adjustment,
     net_risk_score
 )
+historical_replay = build_historical_daily_replay(sm_data)
+if not historical_replay.empty:
+    # Keep the saved same-day model output over a reconstructed close-to-close value.
+    model_score_history = (
+        pd.concat([historical_replay, model_score_history], ignore_index=True)
+        .sort_values("timestamp")
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .tail(MODEL_SCORE_HISTORY_DAYS)
+    )
 
 high_risk_names = [f"#{s['rank']} {s['name']}({s['risk_level']})" for s in switches if s["risk_score"] >= 72]
 opportunity_names = [f"#{s['rank']} {s['name']}({s['opportunity_level']})" for s in switches if s["opportunity_score"] >= 64 and s["risk_score"] < 72]
@@ -2313,6 +2497,11 @@ if not model_score_history.empty:
         score_plot["timestamp"], errors="coerce", utc=True
     ).dt.tz_convert(US_EASTERN)
     score_plot = score_plot.dropna(subset=["timestamp"]).sort_values("timestamp")
+    if "origin" not in score_plot.columns:
+        score_plot["origin"] = "真实模型记录"
+    score_plot["source_label"] = np.where(
+        score_plot["origin"].eq("daily_replay"), "历史日线回放", "真实模型记录"
+    )
     fig_scores = go.Figure()
     marker_colors = [
         "#c0392b" if value >= 38 else
@@ -2329,20 +2518,30 @@ if not model_score_history.empty:
         x=score_plot["timestamp"],
         y=score_plot["net_risk"],
         customdata=score_plot[[
-            "weighted_risk", "weighted_opportunity", "macro_adjustment"
+            "weighted_risk", "weighted_opportunity", "macro_adjustment", "source_label"
         ]].to_numpy(),
         mode="lines+markers",
-        name="净风险",
-        line=dict(color="#2c3e50", width=3),
-        marker=dict(size=8, color=marker_colors, line=dict(color="#ffffff", width=1)),
+        name="历史日线回放",
+        line=dict(color="#7f8c8d", width=2, dash="dot"),
+        marker=dict(size=7, color=marker_colors, line=dict(color="#ffffff", width=1)),
         hovertemplate=(
             "%{x|%Y-%m-%d}<br>"
             "净风险: %{y:.1f}<br>"
             "加权风险: %{customdata[0]:.1f}<br>"
             "加权机会: %{customdata[1]:.1f}<br>"
-            "宏观修正: %{customdata[2]:+.1f}<extra></extra>"
+            "宏观修正: %{customdata[2]:+.1f}<br>"
+            "来源: %{customdata[3]}<extra></extra>"
         )
     ))
+    actual_plot = score_plot.loc[~score_plot["origin"].eq("daily_replay")]
+    if not actual_plot.empty:
+        fig_scores.add_trace(go.Scatter(
+            x=actual_plot["timestamp"], y=actual_plot["net_risk"],
+            mode="lines+markers", name="真实模型记录",
+            line=dict(color="#2c3e50", width=3),
+            marker=dict(size=9, color="#2c3e50", line=dict(color="#ffffff", width=1)),
+            hovertemplate="%{x|%Y-%m-%d}<br>真实模型记录净风险: %{y:.1f}<extra></extra>"
+        ))
     fig_scores.add_hline(y=38, line_dash="dot", line_color="#c0392b", annotation_text="红色防御", annotation_position="top left")
     fig_scores.add_hline(y=16, line_dash="dot", line_color="#e67e22", annotation_text="橙色谨慎", annotation_position="top left")
     fig_scores.add_hline(y=-8, line_dash="dot", line_color="#27ae60", annotation_text="绿色修复", annotation_position="bottom left")
@@ -2353,14 +2552,14 @@ if not model_score_history.empty:
         template="plotly_white",
         height=330,
         margin=dict(l=20, r=20, t=40, b=20),
-        showlegend=False,
+        showlegend=True,
         yaxis=dict(title="净风险分数", range=[score_y_min, score_y_max]),
         xaxis=dict(title="交易日（ET）", rangeslider=dict(visible=False)),
-        title="日线净风险：点色对应当前风险区间；悬停查看风险、机会与宏观拆分"
+        title="日线净风险：虚线为历史日线回放，实线为部署后真实模型记录"
     )
     st.plotly_chart(fig_scores, use_container_width=True)
     st.caption(
-        f"每日仅保留最新模型值；当前实例最多保留最近 {MODEL_SCORE_HISTORY_DAYS} 天。"
+        f"历史回放仅使用收盘后可得的日线数据；加密 OI/资金费率历史不足时按中性处理。"
     )
 else:
     st.info("模型日线历史将在本次运行完成后开始积累。")
