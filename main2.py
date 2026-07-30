@@ -1957,7 +1957,8 @@ def build_historical_daily_replay(sm_data):
                 'macro_adjustment': round(macro, 3),
                 'net_risk': round(risk_score - opportunity_score + macro - neutral_baseline, 3),
                 'origin': 'daily_replay',
-                'qqq_close': round(float(data['QQQ'].iloc[i]), 4)
+                'qqq_close': round(float(data['QQQ'].iloc[i]), 4),
+                'spy_close': round(float(data['SPY'].iloc[i]), 4)
             })
         replay = pd.DataFrame(replay_rows).tail(MODEL_SCORE_HISTORY_DAYS).reset_index(drop=True)
         if replay.empty:
@@ -2531,8 +2532,51 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_daily_equity_benchmark():
+    try:
+        close = fetch_yahoo_core_close()
+        columns = [symbol for symbol in ('QQQ', 'SPY') if symbol in close.columns]
+        return close[columns].dropna(how='all').copy() if columns else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+daily_equity_benchmark = fetch_daily_equity_benchmark()
+
+def add_equity_benchmark_overlay(fig, chart_index, show_qqq, show_spy, has_secondary_y=False):
+    """Overlay QQQ/SPY as rebased daily performance without altering an indicator's scale."""
+    if daily_equity_benchmark.empty or not (show_qqq or show_spy):
+        return
+    dates = pd.DatetimeIndex(pd.to_datetime(chart_index)).tz_localize(None).normalize()
+    benchmark = daily_equity_benchmark.reindex(dates).ffill()
+    columns = [symbol for symbol, enabled in (('QQQ', show_qqq), ('SPY', show_spy)) if enabled and symbol in benchmark]
+    if not columns:
+        return
+    benchmark = benchmark[columns].dropna(how='all')
+    if benchmark.empty:
+        return
+    benchmark = benchmark.divide(benchmark.bfill().iloc[0]).multiply(100)
+    axis = 'y3' if has_secondary_y else 'y2'
+    colors = {'QQQ': '#2980b9', 'SPY': '#8e44ad'}
+    for symbol in columns:
+        fig.add_trace(go.Scatter(
+            x=benchmark.index, y=benchmark[symbol], name=f'{symbol}（起点=100）',
+            yaxis=axis, mode='lines', line=dict(color=colors[symbol], width=1.4),
+            hovertemplate=f'%{{x|%Y-%m-%d}}<br>{symbol} 相对表现: %{{y:.1f}}<extra></extra>'
+        ))
+    axis_config = dict(
+        title='QQQ / SPY（起点=100）', overlaying='y', side='right', showgrid=False
+    )
+    if has_secondary_y:
+        axis_config.update(anchor='free', position=.96)
+        fig.update_layout(yaxis3=axis_config)
+    else:
+        fig.update_layout(yaxis2=axis_config)
+
 st.markdown("### 📈 模型日线净风险趋势")
-show_qqq_compare = st.checkbox("显示 QQQ 对照（右轴）", value=False)
+benchmark_controls = st.columns(2)
+show_qqq_compare = benchmark_controls[0].checkbox("显示 QQQ 对照（右轴）", value=False)
+show_spy_compare = benchmark_controls[1].checkbox("显示 SPY 对照（右轴）", value=False)
 if not model_score_history.empty:
     score_plot = model_score_history.copy()
     score_plot["timestamp"] = pd.to_datetime(
@@ -2584,6 +2628,24 @@ if not model_score_history.empty:
             marker=dict(size=9, color="#2c3e50", line=dict(color="#ffffff", width=1)),
             hovertemplate="%{x|%Y-%m-%d}<br>真实模型记录净风险: %{y:.1f}<extra></extra>"
         ))
+    historical_points = score_plot.loc[score_plot["origin"].eq("daily_replay")]
+    risk_points = historical_points.loc[historical_points["net_risk"] >= 30]
+    opportunity_points = historical_points.loc[
+        (historical_points["net_risk"] <= -8)
+        & (historical_points["weighted_opportunity"] >= 35)
+    ]
+    if not risk_points.empty:
+        fig_scores.add_trace(go.Scatter(
+            x=risk_points["timestamp"], y=risk_points["net_risk"], mode="markers",
+            name="历史风险点", marker=dict(symbol="triangle-down-open", size=10, color="#c0392b"),
+            hovertemplate="%{x|%Y-%m-%d}<br>历史风险点<br>净风险: %{y:.1f}<extra></extra>"
+        ))
+    if not opportunity_points.empty:
+        fig_scores.add_trace(go.Scatter(
+            x=opportunity_points["timestamp"], y=opportunity_points["net_risk"], mode="markers",
+            name="历史机会点", marker=dict(symbol="triangle-up-open", size=10, color="#27ae60"),
+            hovertemplate="%{x|%Y-%m-%d}<br>历史机会点<br>净风险: %{y:.1f}<extra></extra>"
+        ))
     timing = score_plot.loc[score_plot.get("timing_signal", pd.Series("", index=score_plot.index)).ne("")]
     repair_points = timing.loc[timing["timing_signal"].eq("修复确认")]
     defense_points = timing.loc[timing["timing_signal"].eq("防御确认")]
@@ -2599,14 +2661,9 @@ if not model_score_history.empty:
             name="防御确认", marker=dict(symbol="triangle-down", size=12, color="#c0392b"),
             hovertemplate="%{x|%Y-%m-%d}<br>防御确认：风险压力上升且 QQQ 日线转弱<extra></extra>"
         ))
-    if show_qqq_compare and "qqq_close" in score_plot.columns:
-        qqq_plot = score_plot.dropna(subset=["qqq_close"])
-        if not qqq_plot.empty:
-            fig_scores.add_trace(go.Scatter(
-                x=qqq_plot["timestamp"], y=qqq_plot["qqq_close"], mode="lines",
-                name="QQQ（右轴）", yaxis="y2", line=dict(color="#2980b9", width=1.5),
-                hovertemplate="%{x|%Y-%m-%d}<br>QQQ: %{y:.2f}<extra></extra>"
-            ))
+    add_equity_benchmark_overlay(
+        fig_scores, score_plot["timestamp"], show_qqq_compare, show_spy_compare
+    )
     fig_scores.add_hline(y=30, line_dash="dot", line_color="#c0392b", annotation_text="红色防御", annotation_position="top left")
     fig_scores.add_hline(y=10, line_dash="dot", line_color="#e67e22", annotation_text="橙色谨慎", annotation_position="top left")
     fig_scores.add_hline(y=-8, line_dash="dot", line_color="#27ae60", annotation_text="绿色修复", annotation_position="bottom left")
@@ -2619,7 +2676,6 @@ if not model_score_history.empty:
         margin=dict(l=20, r=20, t=40, b=20),
         showlegend=True,
         yaxis=dict(title="净风险分数", range=[score_y_min, score_y_max]),
-        yaxis2=dict(title="QQQ", overlaying="y", side="right", showgrid=False) if show_qqq_compare else None,
         xaxis=dict(title="交易日（ET）", rangeslider=dict(visible=False)),
         title="相对中性基线的日线风险压力：三角形是日线确认信号，不预测精确拐点"
     )
@@ -2748,6 +2804,7 @@ if not ndx_data.empty:
         yaxis=dict(title="NDX Index Points", range=[y_range_min, y_range_max], autorange=False, tickformat=",.0f"),
         xaxis_rangeslider_visible=False, height=500, margin=dict(l=20, r=20, t=40, b=20)
     )
+    add_equity_benchmark_overlay(fig_ndx, ndx_data.index, show_qqq_compare, show_spy_compare)
     st.plotly_chart(fig_ndx, use_container_width=True)
 
 # -----------------------------------------------------------------------------
@@ -2788,6 +2845,7 @@ with tab1:
         fig_sm.update_layout(title_text="DIX 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
         fig_sm.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
         fig_sm.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
+        add_equity_benchmark_overlay(fig_sm, plot_df['date'], show_qqq_compare, show_spy_compare, has_secondary_y=True)
         st.plotly_chart(fig_sm, use_container_width=True)
     else:
         st.warning("数据不可用。")
@@ -2802,6 +2860,7 @@ with tab2:
             fig_vix_spot.add_trace(go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2)))
             fig_vix_spot.add_hline(y=12.0, line_dash="dash", line_color="#c0392b", annotation_text="自满安全线 (12.0)")
             fig_vix_spot.update_layout(title_text="图表 A: VIX 现货恐慌指数趋势", template="plotly_white", height=400)
+            add_equity_benchmark_overlay(fig_vix_spot, v_df.index, show_qqq_compare, show_spy_compare)
             st.plotly_chart(fig_vix_spot, use_container_width=True)
         with v_col2:
             fig_vix_ratio = go.Figure()
@@ -2842,6 +2901,7 @@ with tab2:
                 height=400,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
             )
+            add_equity_benchmark_overlay(fig_vix_ratio, v_df.index, show_qqq_compare, show_spy_compare)
             st.plotly_chart(fig_vix_ratio, use_container_width=True)
 
 # --- TAB 3 ---
@@ -2887,6 +2947,7 @@ with tab3:
         
         fig_crypto.update_yaxes(title_text="<b>合约持仓量 (BTC)</b>", secondary_y=False)
         fig_crypto.update_yaxes(title_text="<b>日均资金费率 (%)</b>", secondary_y=True)
+        add_equity_benchmark_overlay(fig_crypto, c_df.index, show_qqq_compare, show_spy_compare, has_secondary_y=True)
         
         st.plotly_chart(fig_crypto, use_container_width=True)
     else:
@@ -2902,6 +2963,7 @@ with tab4:
         fig_cta.add_trace(go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头得分", line=dict(color="#2ecc71", width=2.5)))
         fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极值激活线 (2)")
         fig_cta.update_layout(title_text="CTA 量化追踪：多/空头趋势耗尽历史得分", template="plotly_white", height=400)
+        add_equity_benchmark_overlay(fig_cta, h_df.index, show_qqq_compare, show_spy_compare)
         st.plotly_chart(fig_cta, use_container_width=True)
 
 # --- TAB 5 ---
@@ -2916,6 +2978,7 @@ with tab5:
             fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_fast'], name="EMA5 (快线)", line=dict(color="#e74c3c", width=2)))
             fig_corr.add_trace(go.Scatter(x=h_df.index, y=h_df['corr_slow'], name="EMA21 (慢线)", line=dict(color="#2c3e50", width=2)))
             fig_corr.update_layout(title_text="CBOE COR1M 相关性快慢线 (死叉形成释放见底信号)", template="plotly_white", height=380)
+            add_equity_benchmark_overlay(fig_corr, h_df.index, show_qqq_compare, show_spy_compare)
             st.plotly_chart(fig_corr, use_container_width=True)
             
         with c6_col2:
@@ -2924,6 +2987,7 @@ with tab5:
             fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_fast'], name="EMA5 (快线)", line=dict(color="#2ecc71", width=2)))
             fig_disp.add_trace(go.Scatter(x=h_df.index, y=h_df['dsp_slow'], name="EMA21 (慢线)", line=dict(color="#34495e", width=2)))
             fig_disp.update_layout(title_text="CBOE DSPX 离散度快慢线 (高位金叉发散警惕拉巨头出货)", template="plotly_white", height=380)
+            add_equity_benchmark_overlay(fig_disp, h_df.index, show_qqq_compare, show_spy_compare)
             st.plotly_chart(fig_disp, use_container_width=True)
 
 # --- TAB 6 ---
@@ -2942,6 +3006,7 @@ with tab6:
                 template="plotly_white", 
                 height=380
             )
+            add_equity_benchmark_overlay(fig_vx_spread, vx_df.index, show_qqq_compare, show_spy_compare)
             st.plotly_chart(fig_vx_spread, use_container_width=True)
             
         with c7_col2:
@@ -2954,6 +3019,7 @@ with tab6:
                 template="plotly_white", 
                 height=380
             )
+            add_equity_benchmark_overlay(fig_vx_ratio, vx_df.index, show_qqq_compare, show_spy_compare)
             st.plotly_chart(fig_vx_ratio, use_container_width=True)
     else:
         st.warning("⚠️ VXN-VIX 科技前哨模块数据未激活或加载失败。")
