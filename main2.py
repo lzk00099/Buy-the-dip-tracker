@@ -2608,8 +2608,11 @@ def add_risk_opportunity_markers(fig, x, y, risk_mask, opportunity_mask, seconda
             fig.add_trace(trace)
 
 def state_entry_points(active_state):
-    """Emit one point when a condition is entered, never one point per day in that condition."""
-    active = pd.Series(np.asarray(active_state)).fillna(False).astype(bool)
+    if isinstance(active_state, pd.Series):
+        active = active_state.copy().fillna(False).astype(bool)
+    else:
+        active = pd.Series(np.asarray(active_state)).fillna(False).astype(bool)
+
     entered = active & ~active.shift(1, fill_value=False)
     if not entered.empty:
         entered.iloc[0] = False
@@ -2877,11 +2880,14 @@ with tab1:
         )
         sm_extreme_points = state_entry_points((gex < 0) & (dix < 40))
         if sm_extreme_points.any():
+            extreme_mask = sm_extreme_points.to_numpy()
             fig_sm.add_trace(go.Scatter(
-                x=pd.Index(plot_df['date'])[sm_extreme_points], y=dix.loc[sm_extreme_points],
-                mode='markers', name='GEX/DIX 极端风险',
-                marker=dict(symbol='x', size=11, color='#7b241c'),
-                hovertemplate='%{x|%Y-%m-%d}<br>GEX/DIX 极端风险：负 Gamma + DIX&lt;40<extra></extra>'
+                x=pd.Index(plot_df["date"])[extreme_mask],
+                y=dix.iloc[extreme_mask],
+                mode="markers",
+                name="GEX/DIX 极端风险",
+                marker=dict(symbol="x", size=11, color="#7b241c"),
+                hovertemplate="%{x|%Y-%m-%d}<br>GEX/DIX 极端风险：负 Gamma + DIX&lt;40<extra></extra>",
             ), secondary_y=False)
         fig_sm.update_layout(title_text="DIX 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
         fig_sm.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
