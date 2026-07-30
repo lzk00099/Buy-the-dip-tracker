@@ -129,6 +129,57 @@ def _write_frame_cache(frame, name):
     frame.to_csv(temp_path)
     os.replace(temp_path, path)
 
+MODEL_SCORE_HISTORY_FILE = "model_score_history.csv"
+MODEL_SCORE_HISTORY_DAYS = 180
+MODEL_SCORE_SAMPLE_MINUTES = 15
+
+def record_model_score_snapshot(risk_score, opportunity_score, macro_score, net_risk_score):
+    """
+    记录模型输出本身（不是伪造的历史回测）。同一个 15 分钟桶只保留最新值，
+    以便在不增加任何外部行情请求的前提下绘制模型分数走势。
+    """
+    path = _market_cache_path(MODEL_SCORE_HISTORY_FILE)
+    columns = [
+        "timestamp", "weighted_risk", "weighted_opportunity",
+        "macro_adjustment", "net_risk"
+    ]
+    try:
+        if os.path.exists(path):
+            history = pd.read_csv(path)
+        else:
+            history = pd.DataFrame(columns=columns)
+        history = history.reindex(columns=columns)
+        history["timestamp"] = pd.to_datetime(
+            history["timestamp"], errors="coerce", utc=True
+        )
+        history = history.dropna(subset=["timestamp"])
+
+        timestamp = pd.Timestamp.now(tz="UTC").floor(
+            f"{MODEL_SCORE_SAMPLE_MINUTES}min"
+        )
+        row = pd.DataFrame([{
+            "timestamp": timestamp,
+            "weighted_risk": round(float(risk_score), 3),
+            "weighted_opportunity": round(float(opportunity_score), 3),
+            "macro_adjustment": round(float(macro_score), 3),
+            "net_risk": round(float(net_risk_score), 3)
+        }])
+        history = pd.concat([history, row], ignore_index=True)
+        history = (
+            history.sort_values("timestamp")
+            .drop_duplicates(subset=["timestamp"], keep="last")
+        )
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(
+            days=MODEL_SCORE_HISTORY_DAYS
+        )
+        history = history.loc[history["timestamp"] >= cutoff].copy()
+        temp_path = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
+        history.to_csv(temp_path, index=False)
+        os.replace(temp_path, path)
+        return history
+    except Exception:
+        return pd.DataFrame(columns=columns)
+
 def _extract_yahoo_close(raw, requested_tickers):
     if raw is None or raw.empty:
         return pd.DataFrame()
@@ -2174,6 +2225,12 @@ weighted_risk_score = sum([s["risk_score"] * s["effective_weight"] for s in swit
 weighted_opportunity_score = sum([s["opportunity_score"] * s["effective_weight"] for s in switches]) / total_effective_weight
 macro_adjustment = macro_data.get("net_adjustment", 0)
 net_risk_score = weighted_risk_score - weighted_opportunity_score + macro_adjustment
+model_score_history = record_model_score_snapshot(
+    weighted_risk_score,
+    weighted_opportunity_score,
+    macro_adjustment,
+    net_risk_score
+)
 
 high_risk_names = [f"#{s['rank']} {s['name']}({s['risk_level']})" for s in switches if s["risk_score"] >= 72]
 opportunity_names = [f"#{s['rank']} {s['name']}({s['opportunity_level']})" for s in switches if s["opportunity_score"] >= 64 and s["risk_score"] < 72]
@@ -2244,6 +2301,54 @@ st.markdown(f"""
     </p>
 </div>
 """, unsafe_allow_html=True)
+
+st.markdown("### 📈 加权风险 / 机会 / 宏观修正 / 净风险走势")
+if not model_score_history.empty:
+    score_plot = model_score_history.copy()
+    score_plot["timestamp"] = pd.to_datetime(
+        score_plot["timestamp"], errors="coerce", utc=True
+    ).dt.tz_convert(US_EASTERN)
+    score_plot = score_plot.dropna(subset=["timestamp"]).sort_values("timestamp")
+    fig_scores = go.Figure()
+    score_series = [
+        ("weighted_risk", "加权风险", "#e74c3c", "solid", 2.2),
+        ("weighted_opportunity", "加权机会", "#27ae60", "solid", 2.2),
+        ("macro_adjustment", "宏观修正", "#8e44ad", "dot", 1.8),
+        ("net_risk", "净风险", "#2c3e50", "solid", 3.2),
+    ]
+    for column, name, color, dash, width in score_series:
+        fig_scores.add_trace(go.Scatter(
+            x=score_plot["timestamp"],
+            y=score_plot[column],
+            mode="lines+markers",
+            name=name,
+            line=dict(color=color, dash=dash, width=width),
+            marker=dict(size=5, color=color),
+            hovertemplate=(
+                "%{x|%Y-%m-%d %H:%M ET}<br>"
+                + name + ": %{y:.1f}<extra></extra>"
+            )
+        ))
+    fig_scores.add_hline(
+        y=0, line_dash="dash", line_color="#7f8c8d",
+        annotation_text="净风险中性线", annotation_position="bottom right"
+    )
+    fig_scores.update_layout(
+        template="plotly_white",
+        height=360,
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        yaxis=dict(title="模型分数 / 宏观修正"),
+        xaxis=dict(title="采样时间（ET）", rangeslider=dict(visible=False)),
+        title="模型观察历史：红=风险，绿=机会，紫=宏观修正，深蓝=净风险"
+    )
+    st.plotly_chart(fig_scores, use_container_width=True)
+    st.caption(
+        f"每 {MODEL_SCORE_SAMPLE_MINUTES} 分钟最多记录一次；当前实例保留最近 "
+        f"{MODEL_SCORE_HISTORY_DAYS} 天的模型观察值。"
+    )
+else:
+    st.info("模型观察历史将在本次运行完成后开始积累。")
 
 st.markdown("### 🔌 双向资金逻辑开关实时追踪")
 cols = st.columns(3)
