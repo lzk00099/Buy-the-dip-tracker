@@ -1936,6 +1936,9 @@ def build_historical_daily_replay(sm_data):
 
             risk_score = sum(score[0] * weight for score, weight in zip(component_scores, weights)) / sum(weights)
             opportunity_score = sum(score[1] * weight for score, weight in zip(component_scores, weights)) / sum(weights)
+            # Zero is the model's neutral daily state, not an arbitrary raw-score level.
+            neutral_pairs = [(28, 0), (20, 25), (32, 20), (30, 25), (28, 18), (24, 24)]
+            neutral_baseline = sum((risk - opp) * weight for (risk, opp), weight in zip(neutral_pairs, weights)) / sum(weights)
 
             macro = 0
             if 'VVIX' in data and data['VVIX'].iloc[max(0, i - 59):i + 1].std() > 0:
@@ -1952,10 +1955,34 @@ def build_historical_daily_replay(sm_data):
                 'weighted_risk': round(risk_score, 3),
                 'weighted_opportunity': round(opportunity_score, 3),
                 'macro_adjustment': round(macro, 3),
-                'net_risk': round(risk_score - opportunity_score + macro, 3),
-                'origin': 'daily_replay'
+                'net_risk': round(risk_score - opportunity_score + macro - neutral_baseline, 3),
+                'origin': 'daily_replay',
+                'qqq_close': round(float(data['QQQ'].iloc[i]), 4)
             })
-        return pd.DataFrame(replay_rows).tail(MODEL_SCORE_HISTORY_DAYS)
+        replay = pd.DataFrame(replay_rows).tail(MODEL_SCORE_HISTORY_DAYS).reset_index(drop=True)
+        if replay.empty:
+            return replay
+        qqq_ma5 = replay['qqq_close'].rolling(5).mean()
+        qqq_return_5 = replay['qqq_close'].pct_change(5)
+        risk_peak_10 = replay['net_risk'].rolling(10, min_periods=5).max()
+        risk_trough_10 = replay['net_risk'].rolling(10, min_periods=5).min()
+        repair = (
+            (replay['net_risk'] <= 8)
+            & ((risk_peak_10 - replay['net_risk']) >= 15)
+            & (replay['qqq_close'] > qqq_ma5)
+            & (qqq_return_5 > 0)
+        )
+        defense = (
+            (replay['net_risk'] >= 24)
+            & ((replay['net_risk'] - risk_trough_10) >= 12)
+            & (replay['qqq_close'] < qqq_ma5)
+            & (qqq_return_5 < 0)
+        )
+        replay['timing_signal'] = np.where(repair, '修复确认', np.where(defense, '防御确认', ''))
+        replay['timing_signal'] = np.where(
+            replay['timing_signal'].eq(replay['timing_signal'].shift()), '', replay['timing_signal']
+        )
+        return replay
     except Exception:
         return pd.DataFrame()
 
@@ -2403,7 +2430,21 @@ total_effective_weight = sum([s["effective_weight"] for s in switches])
 weighted_risk_score = sum([s["risk_score"] * s["effective_weight"] for s in switches]) / total_effective_weight
 weighted_opportunity_score = sum([s["opportunity_score"] * s["effective_weight"] for s in switches]) / total_effective_weight
 macro_adjustment = macro_data.get("net_adjustment", 0)
-net_risk_score = weighted_risk_score - weighted_opportunity_score + macro_adjustment
+# Raw risk-minus-opportunity has a positive structural bias because each switch
+# uses a different score scale.  Centre it on the same neutral state used by the
+# historical replay, so zero genuinely means "no directional model pressure".
+neutral_switch_scores = {
+    1: (28, 0), 2: (20, 25), 3: (32, 20),
+    4: (30, 25), 5: (28, 18), 6: (24, 24)
+}
+neutral_model_baseline = sum(
+    (neutral_switch_scores[s["id"]][0] - neutral_switch_scores[s["id"]][1]) * s["effective_weight"]
+    for s in switches
+) / total_effective_weight
+net_risk_score = (
+    weighted_risk_score - weighted_opportunity_score
+    + macro_adjustment - neutral_model_baseline
+)
 model_score_history = record_model_score_snapshot(
     weighted_risk_score,
     weighted_opportunity_score,
@@ -2424,7 +2465,7 @@ high_risk_names = [f"#{s['rank']} {s['name']}({s['risk_level']})" for s in switc
 opportunity_names = [f"#{s['rank']} {s['name']}({s['opportunity_level']})" for s in switches if s["opportunity_score"] >= 64 and s["risk_score"] < 72]
 ranking_line = " > ".join([f"{s['rank']}.{s['name'].split(' ')[0]}(权重{s['weight']:.2f})" for s in switches])
 
-if net_risk_score >= 38 or weighted_risk_score >= 72:
+if net_risk_score >= 30 or weighted_risk_score >= 72:
     status_color = "red"
     action_title = "🚨 【红色防御：加权风险占优，进入系统性降杠杆模式】"
     action_text = (
@@ -2433,7 +2474,7 @@ if net_risk_score >= 38 or weighted_risk_score >= 72:
         f"<b>主导风险</b>：{'；'.join(high_risk_names[:3]) if high_risk_names else '风险来自多个中等级别开关叠加'}。<br>"
         "策略：净多头降到防御仓位，优先处理高Beta、弱广度、弱现金流标的；新开仓只允许小仓试错，所有盈利仓提高保护性止盈。"
     )
-elif net_risk_score <= -22 and weighted_opportunity_score >= 56:
+elif net_risk_score <= -20 and weighted_opportunity_score >= 56:
     status_color = "green"
     action_title = "🚀 【绿色进攻：加权机会占优，允许分批抄底/加仓】"
     action_text = (
@@ -2442,7 +2483,7 @@ elif net_risk_score <= -22 and weighted_opportunity_score >= 56:
         f"<b>主导机会</b>：{'；'.join(opportunity_names[:3]) if opportunity_names else '机会来自多个开关温和修复'}。<br>"
         "策略：允许分批抄底或提高核心仓位，但仍需避开财务/趋势双弱个股；若盘中实时开关重新转红，立即暂停加仓。"
     )
-elif net_risk_score >= 16:
+elif net_risk_score >= 10:
     status_color = "orange"
     action_title = "🟠 【橙色谨慎：风险边际占优，进入轻防御与观察模式】"
     action_text = (
@@ -2491,6 +2532,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.markdown("### 📈 模型日线净风险趋势")
+show_qqq_compare = st.checkbox("显示 QQQ 对照（右轴）", value=False)
 if not model_score_history.empty:
     score_plot = model_score_history.copy()
     score_plot["timestamp"] = pd.to_datetime(
@@ -2504,15 +2546,15 @@ if not model_score_history.empty:
     )
     fig_scores = go.Figure()
     marker_colors = [
-        "#c0392b" if value >= 38 else
-        "#e67e22" if value >= 16 else
+        "#c0392b" if value >= 30 else
+        "#e67e22" if value >= 10 else
         "#95a5a6" if value > -8 else
         "#27ae60"
         for value in score_plot["net_risk"]
     ]
-    fig_scores.add_hrect(y0=38, y1=100, line_width=0, fillcolor="#e74c3c", opacity=0.08)
-    fig_scores.add_hrect(y0=16, y1=38, line_width=0, fillcolor="#f39c12", opacity=0.08)
-    fig_scores.add_hrect(y0=-8, y1=16, line_width=0, fillcolor="#95a5a6", opacity=0.05)
+    fig_scores.add_hrect(y0=30, y1=100, line_width=0, fillcolor="#e74c3c", opacity=0.08)
+    fig_scores.add_hrect(y0=10, y1=30, line_width=0, fillcolor="#f39c12", opacity=0.08)
+    fig_scores.add_hrect(y0=-8, y1=10, line_width=0, fillcolor="#95a5a6", opacity=0.05)
     fig_scores.add_hrect(y0=-100, y1=-8, line_width=0, fillcolor="#2ecc71", opacity=0.08)
     fig_scores.add_trace(go.Scatter(
         x=score_plot["timestamp"],
@@ -2542,24 +2584,48 @@ if not model_score_history.empty:
             marker=dict(size=9, color="#2c3e50", line=dict(color="#ffffff", width=1)),
             hovertemplate="%{x|%Y-%m-%d}<br>真实模型记录净风险: %{y:.1f}<extra></extra>"
         ))
-    fig_scores.add_hline(y=38, line_dash="dot", line_color="#c0392b", annotation_text="红色防御", annotation_position="top left")
-    fig_scores.add_hline(y=16, line_dash="dot", line_color="#e67e22", annotation_text="橙色谨慎", annotation_position="top left")
+    timing = score_plot.loc[score_plot.get("timing_signal", pd.Series("", index=score_plot.index)).ne("")]
+    repair_points = timing.loc[timing["timing_signal"].eq("修复确认")]
+    defense_points = timing.loc[timing["timing_signal"].eq("防御确认")]
+    if not repair_points.empty:
+        fig_scores.add_trace(go.Scatter(
+            x=repair_points["timestamp"], y=repair_points["net_risk"], mode="markers",
+            name="修复确认", marker=dict(symbol="triangle-up", size=12, color="#27ae60"),
+            hovertemplate="%{x|%Y-%m-%d}<br>修复确认：风险压力回落后，QQQ 日线已转强<extra></extra>"
+        ))
+    if not defense_points.empty:
+        fig_scores.add_trace(go.Scatter(
+            x=defense_points["timestamp"], y=defense_points["net_risk"], mode="markers",
+            name="防御确认", marker=dict(symbol="triangle-down", size=12, color="#c0392b"),
+            hovertemplate="%{x|%Y-%m-%d}<br>防御确认：风险压力上升且 QQQ 日线转弱<extra></extra>"
+        ))
+    if show_qqq_compare and "qqq_close" in score_plot.columns:
+        qqq_plot = score_plot.dropna(subset=["qqq_close"])
+        if not qqq_plot.empty:
+            fig_scores.add_trace(go.Scatter(
+                x=qqq_plot["timestamp"], y=qqq_plot["qqq_close"], mode="lines",
+                name="QQQ（右轴）", yaxis="y2", line=dict(color="#2980b9", width=1.5),
+                hovertemplate="%{x|%Y-%m-%d}<br>QQQ: %{y:.2f}<extra></extra>"
+            ))
+    fig_scores.add_hline(y=30, line_dash="dot", line_color="#c0392b", annotation_text="红色防御", annotation_position="top left")
+    fig_scores.add_hline(y=10, line_dash="dot", line_color="#e67e22", annotation_text="橙色谨慎", annotation_position="top left")
     fig_scores.add_hline(y=-8, line_dash="dot", line_color="#27ae60", annotation_text="绿色修复", annotation_position="bottom left")
     fig_scores.add_hline(y=0, line_dash="dash", line_color="#7f8c8d", annotation_text="中性线", annotation_position="bottom right")
     score_y_min = min(-35, float(np.floor(score_plot["net_risk"].min() - 8)))
-    score_y_max = max(85, float(np.ceil(score_plot["net_risk"].max() + 8)))
+    score_y_max = max(70, float(np.ceil(score_plot["net_risk"].max() + 8)))
     fig_scores.update_layout(
         template="plotly_white",
         height=330,
         margin=dict(l=20, r=20, t=40, b=20),
         showlegend=True,
         yaxis=dict(title="净风险分数", range=[score_y_min, score_y_max]),
+        yaxis2=dict(title="QQQ", overlaying="y", side="right", showgrid=False) if show_qqq_compare else None,
         xaxis=dict(title="交易日（ET）", rangeslider=dict(visible=False)),
-        title="日线净风险：虚线为历史日线回放，实线为部署后真实模型记录"
+        title="相对中性基线的日线风险压力：三角形是日线确认信号，不预测精确拐点"
     )
     st.plotly_chart(fig_scores, use_container_width=True)
     st.caption(
-        f"历史回放仅使用收盘后可得的日线数据；加密 OI/资金费率历史不足时按中性处理。"
+        "绿/红三角形需同时满足风险压力变化与 QQQ 日线确认；它们用于仓位节奏，不替代盘中风控。"
     )
 else:
     st.info("模型日线历史将在本次运行完成后开始积累。")
