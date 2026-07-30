@@ -2607,6 +2607,14 @@ def add_risk_opportunity_markers(fig, x, y, risk_mask, opportunity_mask, seconda
         else:
             fig.add_trace(trace)
 
+def state_entry_points(active_state):
+    """Emit one point when a condition is entered, never one point per day in that condition."""
+    active = pd.Series(np.asarray(active_state)).fillna(False).astype(bool)
+    entered = active & ~active.shift(1, fill_value=False)
+    if not entered.empty:
+        entered.iloc[0] = False
+    return entered
+
 st.markdown("### 📈 模型日线净风险趋势")
 model_show_qqq_compare, model_show_spy_compare = chart_benchmark_controls("model_trend")
 if not model_score_history.empty:
@@ -2858,12 +2866,23 @@ with tab1:
         )
         dix = pd.to_numeric(plot_df['dix'], errors='coerce')
         gex = pd.to_numeric(plot_df['gex'], errors='coerce')
-        sm_risk_points = ((gex < 0) & (dix < 42.5)) | ((gex >= 0) & (dix < 40)) | (gex < -1_000_000_000)
-        sm_opportunity_points = (gex >= 0) & (dix >= 45)
+        # A marker means the state was entered, not that it simply persisted.
+        sm_risk_state = ((gex < 0) & (dix < 42.5)) | ((gex >= 0) & (dix < 40)) | (gex < -1_000_000_000)
+        sm_opportunity_state = (gex >= 0) & (dix >= 45)
+        sm_risk_points = state_entry_points(sm_risk_state)
+        sm_opportunity_points = state_entry_points(sm_opportunity_state)
         add_risk_opportunity_markers(
             fig_sm, plot_df['date'], dix, sm_risk_points, sm_opportunity_points,
-            secondary_y=True, risk_label="GEX/DIX 风险点", opportunity_label="GEX/DIX 机会点"
+            secondary_y=True, risk_label="GEX/DIX 进入风险区", opportunity_label="GEX/DIX 进入机会区"
         )
+        sm_extreme_points = state_entry_points((gex < 0) & (dix < 40))
+        if sm_extreme_points.any():
+            fig_sm.add_trace(go.Scatter(
+                x=pd.Index(plot_df['date'])[sm_extreme_points], y=dix.loc[sm_extreme_points],
+                mode='markers', name='GEX/DIX 极端风险',
+                marker=dict(symbol='x', size=11, color='#7b241c'),
+                hovertemplate='%{x|%Y-%m-%d}<br>GEX/DIX 极端风险：负 Gamma + DIX&lt;40<extra></extra>'
+            ), secondary_y=False)
         fig_sm.update_layout(title_text="DIX 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
         fig_sm.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
         fig_sm.update_yaxes(title_text="<b>Gamma 敞口绝对值</b>", secondary_y=True)
@@ -3067,10 +3086,17 @@ with tab6:
         vx_df = vxn_vix_data["df_hist"]
         spread_golden = (vx_df['Spread_Fast'].shift(1) <= vx_df['Spread_Slow'].shift(1)) & (vx_df['Spread_Fast'] > vx_df['Spread_Slow'])
         spread_death = (vx_df['Spread_Fast'].shift(1) >= vx_df['Spread_Slow'].shift(1)) & (vx_df['Spread_Fast'] < vx_df['Spread_Slow'])
-        vx_opportunity_points = spread_death & (vx_df['Spread'].rolling(5).max() > 8.0) & (vx_df['^VIX'] < 35.0)
-        vx_risk_points = (
+        vx_risk_state = (
             ((vx_df['Spread'] > 7.5) | (vx_df['Ratio'] > 1.35)) & (vx_df['Spread_Fast'] > vx_df['Spread_Slow'])
         ) | (((vx_df['Spread'] < 3.0) | (vx_df['Ratio'] < 1.10)) & spread_golden)
+        # Keep this technology-volatility panel sparse: show only fresh entries
+        # and a separate marker when the spread/ratio becomes truly extreme.
+        vx_risk_points = state_entry_points(vx_risk_state)
+        vx_extreme_points = state_entry_points(
+            ((vx_df['Spread'] > 9.0) | (vx_df['Ratio'] > 1.40))
+            & (vx_df['Spread_Fast'] > vx_df['Spread_Slow'])
+        )
+        no_opportunity_points = pd.Series(False, index=vx_df.index)
         c7_col1, c7_col2 = st.columns(2)
         
         with c7_col1:
@@ -3079,9 +3105,15 @@ with tab6:
             fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Fast'], name="EMA5 (微观快线)", line=dict(color='#e74c3c', width=2)))
             fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Slow'], name="EMA21 (趋势慢线)", line=dict(color='#2c3e50', width=2)))
             add_risk_opportunity_markers(
-                fig_vx_spread, vx_df.index, vx_df['Spread'], vx_risk_points, vx_opportunity_points,
-                risk_label="科技波动风险点", opportunity_label="科技波动修复点"
+                fig_vx_spread, vx_df.index, vx_df['Spread'], vx_risk_points, no_opportunity_points,
+                risk_label="进入科技波动风险区", opportunity_label=""
             )
+            if vx_extreme_points.any():
+                fig_vx_spread.add_trace(go.Scatter(
+                    x=vx_df.index[vx_extreme_points.to_numpy()], y=vx_df.loc[vx_extreme_points, 'Spread'],
+                    mode='markers', name='科技波动极端风险', marker=dict(symbol='x', size=11, color='#7b241c'),
+                    hovertemplate='%{x|%Y-%m-%d}<br>科技波动极端风险<extra></extra>'
+                ))
             fig_vx_spread.update_layout(
                 title_text="VXN - VIX 波动率剪刀差收敛雷达 (高位死叉确立科技股黄金买点)", 
                 template="plotly_white", 
@@ -3096,9 +3128,15 @@ with tab6:
             fig_vx_ratio.add_hline(y=1.35, line_dash="dash", line_color="#e74c3c", annotation_text="极端过热线 (1.35)")
             fig_vx_ratio.add_hline(y=1.10, line_dash="dash", line_color="#2ecc71", annotation_text="极限自满线 (1.10)")
             add_risk_opportunity_markers(
-                fig_vx_ratio, vx_df.index, vx_df['Ratio'], vx_risk_points, vx_opportunity_points,
-                risk_label="科技波动风险点", opportunity_label="科技波动修复点"
+                fig_vx_ratio, vx_df.index, vx_df['Ratio'], vx_risk_points, no_opportunity_points,
+                risk_label="进入科技波动风险区", opportunity_label=""
             )
+            if vx_extreme_points.any():
+                fig_vx_ratio.add_trace(go.Scatter(
+                    x=vx_df.index[vx_extreme_points.to_numpy()], y=vx_df.loc[vx_extreme_points, 'Ratio'],
+                    mode='markers', name='科技波动极端风险', marker=dict(symbol='x', size=11, color='#7b241c'),
+                    hovertemplate='%{x|%Y-%m-%d}<br>科技波动极端风险<extra></extra>'
+                ))
             fig_vx_ratio.update_layout(
                 title_text="VXN / VIX 情绪乘数溢价区间 (追踪科技股相对大盘的拥挤度)", 
                 template="plotly_white", 
