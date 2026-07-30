@@ -131,12 +131,11 @@ def _write_frame_cache(frame, name):
 
 MODEL_SCORE_HISTORY_FILE = "model_score_history.csv"
 MODEL_SCORE_HISTORY_DAYS = 180
-MODEL_SCORE_SAMPLE_MINUTES = 15
 
 def record_model_score_snapshot(risk_score, opportunity_score, macro_score, net_risk_score):
     """
-    记录模型输出本身（不是伪造的历史回测）。同一个 15 分钟桶只保留最新值，
-    以便在不增加任何外部行情请求的前提下绘制模型分数走势。
+    记录模型输出本身（不是伪造的历史回测）。同一个美东交易日只保留最新值，
+    以便在不增加任何外部行情请求的前提下绘制清晰的日线级别模型趋势。
     """
     path = _market_cache_path(MODEL_SCORE_HISTORY_FILE)
     columns = [
@@ -153,9 +152,14 @@ def record_model_score_snapshot(risk_score, opportunity_score, macro_score, net_
             history["timestamp"], errors="coerce", utc=True
         )
         history = history.dropna(subset=["timestamp"])
+        # 兼容早期 15 分钟采样文件：迁移为每个美东自然日一条记录。
+        history["timestamp"] = (
+            history["timestamp"].dt.tz_convert(US_EASTERN).dt.normalize()
+            .dt.tz_convert("UTC")
+        )
 
-        timestamp = pd.Timestamp.now(tz="UTC").floor(
-            f"{MODEL_SCORE_SAMPLE_MINUTES}min"
+        timestamp = (
+            pd.Timestamp.now(tz=US_EASTERN).normalize().tz_convert("UTC")
         )
         row = pd.DataFrame([{
             "timestamp": timestamp,
@@ -2302,7 +2306,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-st.markdown("### 📈 加权风险 / 机会 / 宏观修正 / 净风险走势")
+st.markdown("### 📈 模型日线净风险趋势")
 if not model_score_history.empty:
     score_plot = model_score_history.copy()
     score_plot["timestamp"] = pd.to_datetime(
@@ -2310,45 +2314,56 @@ if not model_score_history.empty:
     ).dt.tz_convert(US_EASTERN)
     score_plot = score_plot.dropna(subset=["timestamp"]).sort_values("timestamp")
     fig_scores = go.Figure()
-    score_series = [
-        ("weighted_risk", "加权风险", "#e74c3c", "solid", 2.2),
-        ("weighted_opportunity", "加权机会", "#27ae60", "solid", 2.2),
-        ("macro_adjustment", "宏观修正", "#8e44ad", "dot", 1.8),
-        ("net_risk", "净风险", "#2c3e50", "solid", 3.2),
+    marker_colors = [
+        "#c0392b" if value >= 38 else
+        "#e67e22" if value >= 16 else
+        "#95a5a6" if value > -8 else
+        "#27ae60"
+        for value in score_plot["net_risk"]
     ]
-    for column, name, color, dash, width in score_series:
-        fig_scores.add_trace(go.Scatter(
-            x=score_plot["timestamp"],
-            y=score_plot[column],
-            mode="lines+markers",
-            name=name,
-            line=dict(color=color, dash=dash, width=width),
-            marker=dict(size=5, color=color),
-            hovertemplate=(
-                "%{x|%Y-%m-%d %H:%M ET}<br>"
-                + name + ": %{y:.1f}<extra></extra>"
-            )
-        ))
-    fig_scores.add_hline(
-        y=0, line_dash="dash", line_color="#7f8c8d",
-        annotation_text="净风险中性线", annotation_position="bottom right"
-    )
+    fig_scores.add_hrect(y0=38, y1=100, line_width=0, fillcolor="#e74c3c", opacity=0.08)
+    fig_scores.add_hrect(y0=16, y1=38, line_width=0, fillcolor="#f39c12", opacity=0.08)
+    fig_scores.add_hrect(y0=-8, y1=16, line_width=0, fillcolor="#95a5a6", opacity=0.05)
+    fig_scores.add_hrect(y0=-100, y1=-8, line_width=0, fillcolor="#2ecc71", opacity=0.08)
+    fig_scores.add_trace(go.Scatter(
+        x=score_plot["timestamp"],
+        y=score_plot["net_risk"],
+        customdata=score_plot[[
+            "weighted_risk", "weighted_opportunity", "macro_adjustment"
+        ]].to_numpy(),
+        mode="lines+markers",
+        name="净风险",
+        line=dict(color="#2c3e50", width=3),
+        marker=dict(size=8, color=marker_colors, line=dict(color="#ffffff", width=1)),
+        hovertemplate=(
+            "%{x|%Y-%m-%d}<br>"
+            "净风险: %{y:.1f}<br>"
+            "加权风险: %{customdata[0]:.1f}<br>"
+            "加权机会: %{customdata[1]:.1f}<br>"
+            "宏观修正: %{customdata[2]:+.1f}<extra></extra>"
+        )
+    ))
+    fig_scores.add_hline(y=38, line_dash="dot", line_color="#c0392b", annotation_text="红色防御", annotation_position="top left")
+    fig_scores.add_hline(y=16, line_dash="dot", line_color="#e67e22", annotation_text="橙色谨慎", annotation_position="top left")
+    fig_scores.add_hline(y=-8, line_dash="dot", line_color="#27ae60", annotation_text="绿色修复", annotation_position="bottom left")
+    fig_scores.add_hline(y=0, line_dash="dash", line_color="#7f8c8d", annotation_text="中性线", annotation_position="bottom right")
+    score_y_min = min(-35, float(np.floor(score_plot["net_risk"].min() - 8)))
+    score_y_max = max(85, float(np.ceil(score_plot["net_risk"].max() + 8)))
     fig_scores.update_layout(
         template="plotly_white",
-        height=360,
+        height=330,
         margin=dict(l=20, r=20, t=40, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        yaxis=dict(title="模型分数 / 宏观修正"),
-        xaxis=dict(title="采样时间（ET）", rangeslider=dict(visible=False)),
-        title="模型观察历史：红=风险，绿=机会，紫=宏观修正，深蓝=净风险"
+        showlegend=False,
+        yaxis=dict(title="净风险分数", range=[score_y_min, score_y_max]),
+        xaxis=dict(title="交易日（ET）", rangeslider=dict(visible=False)),
+        title="日线净风险：点色对应当前风险区间；悬停查看风险、机会与宏观拆分"
     )
     st.plotly_chart(fig_scores, use_container_width=True)
     st.caption(
-        f"每 {MODEL_SCORE_SAMPLE_MINUTES} 分钟最多记录一次；当前实例保留最近 "
-        f"{MODEL_SCORE_HISTORY_DAYS} 天的模型观察值。"
+        f"每日仅保留最新模型值；当前实例最多保留最近 {MODEL_SCORE_HISTORY_DAYS} 天。"
     )
 else:
-    st.info("模型观察历史将在本次运行完成后开始积累。")
+    st.info("模型日线历史将在本次运行完成后开始积累。")
 
 st.markdown("### 🔌 双向资金逻辑开关实时追踪")
 cols = st.columns(3)
