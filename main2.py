@@ -2608,11 +2608,11 @@ def add_risk_opportunity_markers(fig, x, y, risk_mask, opportunity_mask, seconda
             fig.add_trace(trace)
 
 def state_entry_points(active_state):
+    """Emit one point when a condition is entered, never one point per day in that condition."""
     if isinstance(active_state, pd.Series):
         active = active_state.copy().fillna(False).astype(bool)
     else:
         active = pd.Series(np.asarray(active_state)).fillna(False).astype(bool)
-
     entered = active & ~active.shift(1, fill_value=False)
     if not entered.empty:
         entered.iloc[0] = False
@@ -2878,16 +2878,29 @@ with tab1:
             fig_sm, plot_df['date'], dix, sm_risk_points, sm_opportunity_points,
             secondary_y=True, risk_label="GEX/DIX 进入风险区", opportunity_label="GEX/DIX 进入机会区"
         )
-        sm_extreme_points = state_entry_points((gex < 0) & (dix < 40))
+        sm_extreme_state = (gex < 0) & (dix < 40)
+        sm_extreme_points = state_entry_points(sm_extreme_state)
         if sm_extreme_points.any():
-            extreme_mask = sm_extreme_points.to_numpy()
             fig_sm.add_trace(go.Scatter(
-                x=pd.Index(plot_df["date"])[extreme_mask],
-                y=dix.iloc[extreme_mask],
-                mode="markers",
-                name="GEX/DIX 极端风险",
-                marker=dict(symbol="x", size=11, color="#7b241c"),
-                hovertemplate="%{x|%Y-%m-%d}<br>GEX/DIX 极端风险：负 Gamma + DIX&lt;40<extra></extra>",
+                x=pd.Index(plot_df['date'])[sm_extreme_points.to_numpy()], y=dix.iloc[sm_extreme_points.to_numpy()],
+                mode='markers', name='GEX/DIX 极端风险',
+                marker=dict(symbol='x', size=11, color='#7b241c'),
+                hovertemplate='%{x|%Y-%m-%d}<br>GEX/DIX 极端风险：负 Gamma + DIX&lt;40<extra></extra>'
+            ), secondary_y=False)
+        # A recovery is only actionable after an extreme state and a genuine
+        # Gamma/DIX repair; simply leaving DIX<40 is not labelled as a dip buy.
+        sm_extreme_recovery = (
+            sm_extreme_state.shift(1).rolling(7, min_periods=1).max().fillna(False).astype(bool)
+            & (gex >= 0) & (dix >= 42.5) & (dix > dix.shift(1))
+        )
+        sm_extreme_recovery_points = state_entry_points(sm_extreme_recovery)
+        if sm_extreme_recovery_points.any():
+            recovery_mask = sm_extreme_recovery_points.to_numpy()
+            fig_sm.add_trace(go.Scatter(
+                x=pd.Index(plot_df['date'])[recovery_mask], y=dix.iloc[recovery_mask],
+                mode='markers', name='极端风险后修复机会',
+                marker=dict(symbol='star', size=12, color='#1e8449'),
+                hovertemplate='%{x|%Y-%m-%d}<br>极端风险后修复机会：GEX转正且DIX回升<extra></extra>'
             ), secondary_y=False)
         fig_sm.update_layout(title_text="DIX 与做市商 GEX 双向变动曲线", template="plotly_white", height=400)
         fig_sm.update_yaxes(title_text="<b>DIX 比例</b>", secondary_y=False)
@@ -2906,8 +2919,10 @@ with tab2:
         ratio_prev = v_df['Ratio'].shift(1)
         ratio_golden = (v_df['Ratio_Fast'].shift(1) <= v_df['Ratio_Slow'].shift(1)) & (v_df['Ratio_Fast'] > v_df['Ratio_Slow'])
         ratio_death = (v_df['Ratio_Fast'].shift(1) >= v_df['Ratio_Slow'].shift(1)) & (v_df['Ratio_Fast'] < v_df['Ratio_Slow'])
-        vix_opportunity_points = ((ratio_prev <= 1.0) & (v_df['Ratio'] > 1.0)) | (ratio_golden & (v_df['Ratio'] <= 1.05))
-        vix_risk_points = (v_df['Ratio'] >= 1.25) | ((ratio_prev >= 1.0) & (v_df['Ratio'] < 1.0)) | (ratio_death & (v_df['Ratio'] >= 1.15))
+        vix_opportunity_state = ((ratio_prev <= 1.0) & (v_df['Ratio'] > 1.0)) | (ratio_golden & (v_df['Ratio'] <= 1.05))
+        vix_risk_state = (v_df['Ratio'] >= 1.25) | ((ratio_prev >= 1.0) & (v_df['Ratio'] < 1.0)) | (ratio_death & (v_df['Ratio'] >= 1.15))
+        vix_opportunity_points = state_entry_points(vix_opportunity_state)
+        vix_risk_points = state_entry_points(vix_risk_state)
         with v_col1:
             fig_vix_spot = go.Figure()
             fig_vix_spot.add_trace(go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2)))
@@ -2998,16 +3013,18 @@ with tab3:
         # 添加水平参照线
         fig_crypto.add_hline(y=0.0, secondary_y=True, line_dash="solid", line_color="#7f8c8d", opacity=0.6)
         fig_crypto.add_hline(y=0.025, secondary_y=True, line_dash="dash", line_color="#e74c3c", annotation_text="多头极端过热线 (0.025%)")
-        crypto_risk_points = (
+        crypto_risk_state = (
             (c_df['close'] > c_df['price_ma7'])
             & (c_df['oi'] > c_df['oi_ma7'] * 1.03)
             & (c_df['funding_rate'] >= 0.025)
         ) | ((c_df['close'].diff() > 0) & (c_df['oi'] < c_df['oi_ma7'] * 0.92))
-        crypto_opportunity_points = (
+        crypto_opportunity_state = (
             (c_df['close'] < c_df['price_ma7'])
             & (c_df['oi'] < c_df['oi_ma7'] * 0.95)
             & (c_df['funding_rate'] <= 0.005)
         )
+        crypto_risk_points = state_entry_points(crypto_risk_state)
+        crypto_opportunity_points = state_entry_points(crypto_opportunity_state)
         add_risk_opportunity_markers(
             fig_crypto, c_df.index, c_df['oi'], crypto_risk_points, crypto_opportunity_points,
             secondary_y=True, risk_label="杠杆拥挤风险点", opportunity_label="去杠杆机会点"
@@ -3040,7 +3057,7 @@ with tab4:
         fig_cta.add_trace(go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头得分", line=dict(color="#2ecc71", width=2.5)))
         fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极值激活线 (2)")
         add_risk_opportunity_markers(
-            fig_cta, h_df.index, h_df['cta_longs'], h_df['cta_longs'] >= 2, h_df['cta_shorts'] >= 2,
+            fig_cta, h_df.index, h_df['cta_longs'], state_entry_points(h_df['cta_longs'] >= 2), state_entry_points(h_df['cta_shorts'] >= 2),
             risk_label="CTA 多头拥挤风险点", opportunity_label="CTA 空头耗尽机会点",
             opportunity_y=h_df['cta_shorts']
         )
@@ -3102,7 +3119,8 @@ with tab6:
             ((vx_df['Spread'] > 9.0) | (vx_df['Ratio'] > 1.40))
             & (vx_df['Spread_Fast'] > vx_df['Spread_Slow'])
         )
-        no_opportunity_points = pd.Series(False, index=vx_df.index)
+        vx_opportunity_state = spread_death & (vx_df['Spread'].rolling(5).max() > 8.0) & (vx_df['^VIX'] < 35.0)
+        vx_opportunity_points = state_entry_points(vx_opportunity_state)
         c7_col1, c7_col2 = st.columns(2)
         
         with c7_col1:
@@ -3111,12 +3129,12 @@ with tab6:
             fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Fast'], name="EMA5 (微观快线)", line=dict(color='#e74c3c', width=2)))
             fig_vx_spread.add_trace(go.Scatter(x=vx_df.index, y=vx_df['Spread_Slow'], name="EMA21 (趋势慢线)", line=dict(color='#2c3e50', width=2)))
             add_risk_opportunity_markers(
-                fig_vx_spread, vx_df.index, vx_df['Spread'], vx_risk_points, no_opportunity_points,
-                risk_label="进入科技波动风险区", opportunity_label=""
+                fig_vx_spread, vx_df.index, vx_df['Spread'], vx_risk_points, vx_opportunity_points,
+                risk_label="进入科技波动风险区", opportunity_label="科技波动修复机会"
             )
             if vx_extreme_points.any():
                 fig_vx_spread.add_trace(go.Scatter(
-                    x=vx_df.index[vx_extreme_points.to_numpy()], y=vx_df.loc[vx_extreme_points, 'Spread'],
+                    x=vx_df.index[vx_extreme_points.to_numpy()], y=vx_df['Spread'].iloc[vx_extreme_points.to_numpy()],
                     mode='markers', name='科技波动极端风险', marker=dict(symbol='x', size=11, color='#7b241c'),
                     hovertemplate='%{x|%Y-%m-%d}<br>科技波动极端风险<extra></extra>'
                 ))
@@ -3134,12 +3152,12 @@ with tab6:
             fig_vx_ratio.add_hline(y=1.35, line_dash="dash", line_color="#e74c3c", annotation_text="极端过热线 (1.35)")
             fig_vx_ratio.add_hline(y=1.10, line_dash="dash", line_color="#2ecc71", annotation_text="极限自满线 (1.10)")
             add_risk_opportunity_markers(
-                fig_vx_ratio, vx_df.index, vx_df['Ratio'], vx_risk_points, no_opportunity_points,
-                risk_label="进入科技波动风险区", opportunity_label=""
+                fig_vx_ratio, vx_df.index, vx_df['Ratio'], vx_risk_points, vx_opportunity_points,
+                risk_label="进入科技波动风险区", opportunity_label="科技波动修复机会"
             )
             if vx_extreme_points.any():
                 fig_vx_ratio.add_trace(go.Scatter(
-                    x=vx_df.index[vx_extreme_points.to_numpy()], y=vx_df.loc[vx_extreme_points, 'Ratio'],
+                    x=vx_df.index[vx_extreme_points.to_numpy()], y=vx_df['Ratio'].iloc[vx_extreme_points.to_numpy()],
                     mode='markers', name='科技波动极端风险', marker=dict(symbol='x', size=11, color='#7b241c'),
                     hovertemplate='%{x|%Y-%m-%d}<br>科技波动极端风险<extra></extra>'
                 ))
