@@ -1024,10 +1024,10 @@ def fetch_vix_data():
                 '^VIX3M': fetch_cboe_official_history('VIX3M')
             },
             axis=1
-        ).sort_index().ffill().dropna().tail(90)
+        ).sort_index().ffill().dropna().tail(180)
         close_data = overlay_intraday_prices(
             close_data, ['^VIX', '^VIX3M'], require_all=True
-        ).tail(90)
+        ).tail(180)
         if not close_data.empty:
             close_data['Ratio'] = close_data['^VIX3M'] / close_data['^VIX']
             
@@ -1133,7 +1133,7 @@ def fetch_vix_data():
                 "vix_diag_status": vix_diag_status,
                 "vix_ratio_diag": vix_ratio_diag,
                 "vix_spot_diag": vix_spot_diag,
-                "df": close_data.tail(60),
+                "df": close_data.tail(180),
                 "fetched_at": market_data_timestamp(close_data),
                 "quote_mode": close_data.attrs.get("quote_mode", "daily_fallback"),
                 "quote_age_minutes": close_data.attrs.get("quote_age_minutes"),
@@ -1251,7 +1251,7 @@ def fetch_crypto_signals():
             "bottom_active": bottom_active, 
             "top_active": top_active, 
             "error": False,
-            "hist_df": df_merged.tail(30), # 提供最近30天数据供图标渲染
+            "hist_df": df_merged.tail(90), # OKX 可用日线窗口内尽量保留事件上下文
             "fetched_at": datetime.datetime.now(US_EASTERN).strftime(
                 '%Y-%m-%d %H:%M:%S ET'
             )
@@ -1541,7 +1541,7 @@ def calculate_quant_and_breadth_signals():
             "combined_diag": combined_diag,  
             "corr_risk_level": corr_risk_level,
             "corr_risk_diag": corr_risk_diag,
-            "df_hist": df_hist.tail(60),
+            "df_hist": df_hist.tail(180),
             "data_source": yf_data.attrs.get("data_source", "live_market_sources"),
             "cache_age_hours": yf_data.attrs.get("cache_age_hours", 0.0),
             "fetched_at": market_data_timestamp(yf_data),
@@ -1565,10 +1565,10 @@ def fetch_vxn_vix_data():
                 '^VIX': fetch_cboe_official_history('VIX')
             },
             axis=1
-        ).sort_index().ffill().dropna().tail(90)
+        ).sort_index().ffill().dropna().tail(180)
         df = overlay_intraday_prices(
             df, ['^VXN', '^VIX'], require_all=True
-        ).tail(90)
+        ).tail(180)
         
         if not df.empty:
             
@@ -2607,15 +2607,15 @@ def add_risk_opportunity_markers(fig, x, y, risk_mask, opportunity_mask, seconda
         else:
             fig.add_trace(trace)
 
-def state_entry_points(active_state):
-    """Emit one point when a condition is entered, never one point per day in that condition."""
+def state_entry_points(active_state, mark_initial_active=False):
+    """Emit one point when a condition is entered; optionally retain an active window start."""
     if isinstance(active_state, pd.Series):
         active = active_state.copy().fillna(False).astype(bool)
     else:
         active = pd.Series(np.asarray(active_state)).fillna(False).astype(bool)
     entered = active & ~active.shift(1, fill_value=False)
     if not entered.empty:
-        entered.iloc[0] = False
+        entered.iloc[0] = bool(active.iloc[0]) if mark_initial_active else False
     return entered
 
 st.markdown("### 📈 模型日线净风险趋势")
@@ -2872,14 +2872,14 @@ with tab1:
         # A marker means the state was entered, not that it simply persisted.
         sm_risk_state = ((gex < 0) & (dix < 42.5)) | ((gex >= 0) & (dix < 40)) | (gex < -1_000_000_000)
         sm_opportunity_state = (gex >= 0) & (dix >= 45)
-        sm_risk_points = state_entry_points(sm_risk_state)
-        sm_opportunity_points = state_entry_points(sm_opportunity_state)
+        sm_risk_points = state_entry_points(sm_risk_state, mark_initial_active=True)
+        sm_opportunity_points = state_entry_points(sm_opportunity_state, mark_initial_active=True)
         add_risk_opportunity_markers(
             fig_sm, plot_df['date'], dix, sm_risk_points, sm_opportunity_points,
             secondary_y=True, risk_label="GEX/DIX 进入风险区", opportunity_label="GEX/DIX 进入机会区"
         )
         sm_extreme_state = (gex < 0) & (dix < 40)
-        sm_extreme_points = state_entry_points(sm_extreme_state)
+        sm_extreme_points = state_entry_points(sm_extreme_state, mark_initial_active=True)
         if sm_extreme_points.any():
             fig_sm.add_trace(go.Scatter(
                 x=pd.Index(plot_df['date'])[sm_extreme_points.to_numpy()], y=dix.iloc[sm_extreme_points.to_numpy()],
@@ -2890,10 +2890,12 @@ with tab1:
         # A recovery is only actionable after an extreme state and a genuine
         # Gamma/DIX repair; simply leaving DIX<40 is not labelled as a dip buy.
         sm_extreme_recovery = (
-            sm_extreme_state.shift(1).rolling(7, min_periods=1).max().fillna(False).astype(bool)
-            & (gex >= 0) & (dix >= 42.5) & (dix > dix.shift(1))
+            sm_extreme_state.shift(1).fillna(False)
+            & ~sm_extreme_state
+            & (dix > dix.shift(1))
+            & (gex > gex.shift(1))
         )
-        sm_extreme_recovery_points = state_entry_points(sm_extreme_recovery)
+        sm_extreme_recovery_points = state_entry_points(sm_extreme_recovery, mark_initial_active=True)
         if sm_extreme_recovery_points.any():
             recovery_mask = sm_extreme_recovery_points.to_numpy()
             fig_sm.add_trace(go.Scatter(
@@ -2921,8 +2923,8 @@ with tab2:
         ratio_death = (v_df['Ratio_Fast'].shift(1) >= v_df['Ratio_Slow'].shift(1)) & (v_df['Ratio_Fast'] < v_df['Ratio_Slow'])
         vix_opportunity_state = ((ratio_prev <= 1.0) & (v_df['Ratio'] > 1.0)) | (ratio_golden & (v_df['Ratio'] <= 1.05))
         vix_risk_state = (v_df['Ratio'] >= 1.25) | ((ratio_prev >= 1.0) & (v_df['Ratio'] < 1.0)) | (ratio_death & (v_df['Ratio'] >= 1.15))
-        vix_opportunity_points = state_entry_points(vix_opportunity_state)
-        vix_risk_points = state_entry_points(vix_risk_state)
+        vix_opportunity_points = state_entry_points(vix_opportunity_state, mark_initial_active=True)
+        vix_risk_points = state_entry_points(vix_risk_state, mark_initial_active=True)
         with v_col1:
             fig_vix_spot = go.Figure()
             fig_vix_spot.add_trace(go.Scatter(x=v_df.index, y=v_df['^VIX'], name="VIX 现货指数", line=dict(color="#e67e22", width=2)))
@@ -3023,8 +3025,8 @@ with tab3:
             & (c_df['oi'] < c_df['oi_ma7'] * 0.95)
             & (c_df['funding_rate'] <= 0.005)
         )
-        crypto_risk_points = state_entry_points(crypto_risk_state)
-        crypto_opportunity_points = state_entry_points(crypto_opportunity_state)
+        crypto_risk_points = state_entry_points(crypto_risk_state, mark_initial_active=True)
+        crypto_opportunity_points = state_entry_points(crypto_opportunity_state, mark_initial_active=True)
         add_risk_opportunity_markers(
             fig_crypto, c_df.index, c_df['oi'], crypto_risk_points, crypto_opportunity_points,
             secondary_y=True, risk_label="杠杆拥挤风险点", opportunity_label="去杠杆机会点"
@@ -3056,8 +3058,10 @@ with tab4:
         fig_cta.add_trace(go.Scatter(x=h_df.index, y=h_df['cta_shorts'], name="系统性空头得分", line=dict(color="#e74c3c", width=2.5)))
         fig_cta.add_trace(go.Scatter(x=h_df.index, y=h_df['cta_longs'], name="系统性多头得分", line=dict(color="#2ecc71", width=2.5)))
         fig_cta.add_hline(y=2, line_dash="dash", line_color="#34495e", annotation_text="极值激活线 (2)")
+        cta_risk_points = state_entry_points(h_df['cta_longs'] >= 2, mark_initial_active=True)
+        cta_opportunity_points = state_entry_points(h_df['cta_shorts'] >= 2, mark_initial_active=True)
         add_risk_opportunity_markers(
-            fig_cta, h_df.index, h_df['cta_longs'], state_entry_points(h_df['cta_longs'] >= 2), state_entry_points(h_df['cta_shorts'] >= 2),
+            fig_cta, h_df.index, h_df['cta_longs'], cta_risk_points, cta_opportunity_points,
             risk_label="CTA 多头拥挤风险点", opportunity_label="CTA 空头耗尽机会点",
             opportunity_y=h_df['cta_shorts']
         )
@@ -3114,13 +3118,13 @@ with tab6:
         ) | (((vx_df['Spread'] < 3.0) | (vx_df['Ratio'] < 1.10)) & spread_golden)
         # Keep this technology-volatility panel sparse: show only fresh entries
         # and a separate marker when the spread/ratio becomes truly extreme.
-        vx_risk_points = state_entry_points(vx_risk_state)
+        vx_risk_points = state_entry_points(vx_risk_state, mark_initial_active=True)
         vx_extreme_points = state_entry_points(
             ((vx_df['Spread'] > 9.0) | (vx_df['Ratio'] > 1.40))
-            & (vx_df['Spread_Fast'] > vx_df['Spread_Slow'])
+            & (vx_df['Spread_Fast'] > vx_df['Spread_Slow']), mark_initial_active=True
         )
         vx_opportunity_state = spread_death & (vx_df['Spread'].rolling(5).max() > 8.0) & (vx_df['^VIX'] < 35.0)
-        vx_opportunity_points = state_entry_points(vx_opportunity_state)
+        vx_opportunity_points = state_entry_points(vx_opportunity_state, mark_initial_active=True)
         c7_col1, c7_col2 = st.columns(2)
         
         with c7_col1:
