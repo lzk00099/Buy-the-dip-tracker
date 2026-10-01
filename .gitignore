@@ -1,0 +1,9 @@
+.sentinel-data/
+data_store/
+__pycache__/
+.pytest_cache/
+.streamlit/secrets.toml
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.tmp

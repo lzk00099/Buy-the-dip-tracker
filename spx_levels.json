@@ -1,0 +1,18 @@
+{
+  "instrument": "SPX",
+  "basis": "spot",
+  "verified": true,
+  "verification": "public_secondary_report",
+  "asof": "2026-09-29",
+  "expires": "2026-10-06",
+  "publisher": "Tickmill / Patrick Munnelly",
+  "attributed_to": "Cullen Morgan, Goldman Sachs FICC & Equities",
+  "source_url": "https://www.tickmill.com/blog/institutional-insights-goldman-sachs-sp500-positioning-key-levles-29926",
+  "levels": [
+    {"value": 7665, "label": "短期 CTA 枢轴（报道）7,665"},
+    {"value": 7444, "label": "中期 CTA 枢轴（报道）7,444"},
+    {"value": 6972, "label": "长期 CTA 枢轴（报道）6,972"}
+  ],
+  "reviewed_at": "2026-09-30",
+  "note": "已核对公开报道，未独立取得高盛原始报告。枢轴不是保证成交的抛售线。到期日是看板最多7天的陈旧数据保护规则，并非报告保证的有效期。"
+}
