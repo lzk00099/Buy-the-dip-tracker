@@ -1,0 +1,12 @@
+{
+  "instrument": "NDX",
+  "basis": "spot",
+  "verified": false,
+  "asof": null,
+  "expires": null,
+  "publisher": null,
+  "source_url": null,
+  "levels": [],
+  "reviewed_at": "2026-09-30",
+  "note": "No current NDX spot CTA thresholds verified from an original institutional report. Do not substitute NQ futures, SPX, QQQ, undated commentary or technical proxies."
+}
