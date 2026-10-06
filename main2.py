@@ -463,14 +463,22 @@ def fetch_okx_signal_inputs():
         params={"instId": "BTC-USDT", "bar": "1Dutc", "limit": "60"}
     )
     oi = _request_json_with_backoff(
-        "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-volume",
-        params={"ccy": "BTC", "period": "1D"}
+        "https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history",
+        params={"instId": "BTC-USDT-SWAP", "period": "1Dutc", "limit": "60"}
     )
     funding = _request_json_with_backoff(
         "https://www.okx.com/api/v5/public/funding-rate-history",
         params={"instId": "BTC-USDT-SWAP", "limit": "100"}
     )
     return price, oi, funding
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_okx_current_oi():
+    return _request_json_with_backoff(
+        "https://www.okx.com/api/v5/public/open-interest",
+        params={"instType": "SWAP", "instId": "BTC-USDT-SWAP"}
+    )
 
 RISK_SCORE_MAP = {
     "极高风险": 100,
@@ -680,58 +688,18 @@ def fetch_vix_data():
     return {"error": True, "msg": "No data", "bottom_active": False, "top_active": False, "fetched_at": "空数据"}
 
 def fetch_crypto_signals():
+    live = {}
+    live_error = ''
     try:
-        # BTC 价格、OI 与资金费率全部走 OKX 官方 API，彻底移除该开关的 Yahoo 依赖。
+        # Revalidate after cache lookup: a cached response must not look current.
+        live = mr.current_crypto_oi(fetch_okx_current_oi(), now=market_session['now_et'])
+    except Exception as exc:
+        live_error = mr.safe_error(exc)
+    context = {'oi_current': live, 'oi_current_error': live_error,
+               'oi_instrument': 'BTC-USDT-SWAP', 'oi_unit': 'USD'}
+    try:
         price_res, r_res, fr_res = fetch_okx_signal_inputs()
-
-        if not price_res.get("data"):
-            raise Exception("OKX BTC 日线接口无返回数据")
-        price_data = []
-        for row in price_res['data']:
-            ts = pd.to_datetime(int(row[0]), unit='ms', utc=True).normalize()
-            price_data.append({'timestamp': ts, 'close': float(row[4])})
-        df_price = (
-            pd.DataFrame(price_data)
-            .drop_duplicates('timestamp', keep='last')
-            .set_index('timestamp')
-            .sort_index()
-        )
-
-        # 2. 持仓量 (OI)：使用 OKX Rubik 历史接口
-        if not r_res.get("data"):
-            raise Exception(f"OKX OI 接口异常: {r_res.get('msg', '无返回数据')}")
-            
-        oi_data = []
-        for row in r_res['data']:
-            ts = pd.to_datetime(int(row[0]), unit='ms', utc=True).normalize()
-            oi_btc = float(row[1])
-            oi_data.append({'timestamp': ts, 'oi': oi_btc})
-        df_oi = pd.DataFrame(oi_data).set_index('timestamp')
-
-        # 3. 资金费率 (FR)：使用 OKX 历史资金费率接口
-        if not fr_res.get("data"):
-            raise Exception(f"OKX FR 接口异常: {fr_res.get('msg', '无返回数据')}")
-            
-        fr_data = []
-        for row in fr_res['data']:
-            ts = pd.to_datetime(int(row['fundingTime']), unit='ms', utc=True).normalize()
-            fr_rate = float(row['fundingRate']) * 100
-            fr_data.append({'timestamp': ts, 'funding_rate': fr_rate})
-        df_fr = pd.DataFrame(fr_data)
-        # 每天可能有3个费率(8小时一次结算)，按天取平均值平滑处理
-        df_fr = df_fr.groupby('timestamp')['funding_rate'].mean().to_frame()
-
-        # 4. 数据合并：强制时间轴绝对对齐
-        df_merged = df_price.join(df_oi, how='inner').join(df_fr, how='inner')
-        df_merged = df_merged.sort_index().ffill()
-
-        if df_merged.empty or len(df_merged) < 7:
-            raise Exception(f"数据源合并失败或样本过少 (当前成功对齐天数: {len(df_merged)})")
-
-        # 5. 引入均线计算(MA7)，抹平日内噪音，让判断更精准
-        df_merged['oi_ma7'] = df_merged['oi'].rolling(7).mean()
-        df_merged['price_ma7'] = df_merged['close'].rolling(7).mean()
-        df_merged = df_merged.dropna()
+        df_merged = mr.crypto_daily_frame(price_res, r_res, fr_res, now=market_session['now_et'])
 
         current_row = df_merged.iloc[-1]
         prev_row = df_merged.iloc[-2]
@@ -778,6 +746,7 @@ def fetch_crypto_signals():
             diag_status = f"⚪ 【震荡博弈/观望】价格均线缠绕，OI变动平缓({oi_trend_str})，系统处于风险真空期。"
 
         return {
+            **context,
             "btc_price": f"${current_price:,.2f}",
             "price_trend": price_trend_str,
             "oi": f"${current_oi:,.0f} USD",
@@ -793,7 +762,7 @@ def fetch_crypto_signals():
         }
     except Exception as e:
         # 捕获真实报错抛给前端
-        return {"error": True, "msg": str(e), "bottom_active": False, "top_active": False, "fetched_at": "异常拦截"}
+        return {**context, "error": True, "msg": mr.safe_error(e), "bottom_active": False, "top_active": False, "fetched_at": "异常拦截"}
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_squeezemetrics_data():
@@ -1596,14 +1565,14 @@ switches = [
         "opportunity_score": crypto_profile["opportunity_score"],
         "bottom_active": crypto_data["bottom_active"] if not crypto_data["error"] else False,
         "top_active": crypto_data["top_active"] if not crypto_data["error"] else False,
-        "value": f"BTC现货: {crypto_data.get('btc_price', 'N/A')} ({crypto_data.get('price_trend', '')}) | OI: {crypto_data.get('oi', 'N/A')} ({crypto_data.get('oi_trend', '')}) | 费率: {crypto_data.get('funding_rate', 'N/A')}",
-        "source": "OKX 官方 API (BTC K线 ✖ OI ✖ 资金费率)",
+        "value": f"BTC日线: {crypto_data.get('btc_price', 'N/A')} ({crypto_data.get('price_trend', '')}) | OI(日线): {crypto_data.get('oi', 'N/A')} ({crypto_data.get('oi_trend', '')}) | 费率: {crypto_data.get('funding_rate', 'N/A')}",
+        "source": "OKX：BTC-USDT现货日线 ✖ BTC-USDT-SWAP永续OI(USD)/资金费率（非全市场）",
         "desc_bottom": "【缩量爆仓抄底】当 **价格下跌 + OI显著下降 + 费率转负**。代表做多杠杆被彻底清算，市场流动性恐慌见底，是高胜率左侧或右侧建仓点。",
         "desc_top": "【拥挤过载逃顶】触发两种情况立即防御：① **价格上涨 + OI上升 + 费率极高** (多头拥挤，极易被爆)；② **价格上涨 + OI下降** (缺乏新资金的假突破)。",
         "fetched_status": f"数据抓取失败 🔴 <br><span style='font-size:8pt;color:#e74c3c;'>异常原因: {crypto_data.get('msg', '未知断流')}</span>" if crypto_data["error"] else (
             f"<div style='background-color:#f4f6f7; padding:8px; border-radius:5px; margin-bottom:5px; font-weight:bold; color:#2c3e50;'>{crypto_data.get('diag_status')}</div>"
         ),
-        "update_cycle": "OKX日线模型，页面刷新不会变成逐笔行情",
+        "update_cycle": "OI现值每5分钟检查；日线模型每30分钟更新（含当日未收盘数据）",
         "last_updated": crypto_data.get("fetched_at", now_str)
     },
     {
@@ -2233,6 +2202,14 @@ with tab2:
 
 # --- TAB 3 ---
 with tab3:
+    live_oi = crypto_data.get('oi_current', {})
+    if live_oi:
+        st.metric('OKX BTC-USDT 永续合约 · 当前OI（USD）', f"${live_oi['value']:,.0f}")
+        st.caption('行情时间：' + pd.Timestamp(live_oi['timestamp']).tz_convert(US_EASTERN).strftime('%Y-%m-%d %H:%M:%S ET')
+                   + ' · 每5分钟检查；仅此合约，不是全市场总量。')
+    else:
+        st.info('当前OI暂不可用：' + crypto_data.get('oi_current_error', '未取得有效快照') + '；不以0代替。')
+    st.caption('历史图与信号统一使用BTC-USDT永续OI（USD）及其日均资金费率，按UTC日对齐；当日可能尚未收盘。')
     tab3_qqq, tab3_spy = chart_benchmark_controls("tab3")
     if not crypto_data.get("error", True) and crypto_data.get("hist_df") is not None:
         c_df = crypto_data["hist_df"]
@@ -2244,8 +2221,8 @@ with tab3:
         fig_crypto.add_trace(
             go.Scatter(
                 x=c_df.index, y=c_df['oi'], 
-                name="OKX 持仓名义金额 (USD)",
-                line=dict(color="#3498db", width=2, shape='spline'),
+                name="BTC-USDT永续 OI (USD)",
+                line=dict(color="#3498db", width=2), connectgaps=False,
                 fill='tozeroy', fillcolor='rgba(52, 152, 219, 0.15)'
             ),
             secondary_y=False,
@@ -2278,18 +2255,18 @@ with tab3:
         crypto_opportunity_points = state_entry_points(crypto_opportunity_state, mark_initial_active=True)
         add_risk_opportunity_markers(
             fig_crypto, c_df.index, c_df['oi'], crypto_risk_points, crypto_opportunity_points,
-            secondary_y=True, risk_label="杠杆拥挤风险点", opportunity_label="去杠杆机会点"
+            secondary_y=False, risk_label="杠杆拥挤风险点", opportunity_label="去杠杆机会点"
         )
         
         fig_crypto.update_layout(
-            title_text="加密离岸雷达：BTC 持仓规模 (OKX) 与日均资金费率同步校验", 
+            title_text="加密离岸雷达：BTC-USDT永续 OI (USD) 与日均资金费率", 
             template="plotly_white", 
             height=400,
             hovermode="x unified",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         
-        fig_crypto.update_yaxes(title_text="<b>OKX 持仓名义金额 (USD)</b>", secondary_y=False)
+        fig_crypto.update_yaxes(title_text="<b>BTC-USDT永续 OI (USD)</b>", secondary_y=False)
         fig_crypto.update_yaxes(title_text="<b>日均资金费率 (%)</b>", secondary_y=True)
         add_equity_benchmark_overlay(fig_crypto, c_df.index, tab3_qqq, tab3_spy, has_secondary_y=True)
         

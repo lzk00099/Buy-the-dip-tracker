@@ -358,11 +358,97 @@ def save_observation(scores, components, inputs, quality_ok, input_date, now=Non
     return record,[json.loads(x[0]) for x in rows]
 
 
+def crypto_daily_frame(price_payload, oi_payload, funding_payload, now=None):
+    """One instrument, USD OI (fourth field), UTC days; never fill missing OI."""
+    current = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz='UTC')
+    current = current.tz_convert('UTC')
+
+    def rows(payload):
+        if payload.get('code') not in (None, '0') or not payload.get('data'):
+            raise ValueError('OKX接口返回错误或空数据')
+        return payload['data']
+
+    def frame(values, column, positive=True):
+        result = pd.DataFrame(values, columns=['timestamp', column])
+        result['timestamp'] = pd.to_datetime(result.timestamp, unit='ms', utc=True, errors='coerce')
+        result[column] = pd.to_numeric(result[column], errors='coerce')
+        valid = result[column].map(lambda x: pd.notna(x) and math.isfinite(x))
+        if positive:
+            valid &= result[column] > 0
+        result.loc[~valid, column] = float('nan')
+        result = result.loc[result.timestamp.notna() & (result.timestamp <= current + pd.Timedelta(minutes=1))]
+        result = result.sort_values('timestamp').drop_duplicates('timestamp', keep='last')
+        return result.set_index('timestamp')
+
+    prices = frame([(int(r[0]), r[4]) for r in rows(price_payload)], 'close')
+    oi_rows = rows(oi_payload)
+    if any(not isinstance(r, (list, tuple)) or len(r) != 4 for r in oi_rows):
+        raise ValueError('OI历史结构异常：必须为[ts, oi, oiCcy, oiUsd]，不接收旧聚合接口')
+    interests = frame([(int(r[0]), r[3]) for r in oi_rows], 'oi')
+    # 1Dutc requests must really return UTC midnight bars; don't silently shift.
+    if any(not f.index.equals(f.index.normalize()) for f in (prices, interests)):
+        raise ValueError('OKX日线时间不是UTC零点，暂停混合不同日界线的数据')
+    funding = frame([(int(r['fundingTime']), r['fundingRate']) for r in rows(funding_payload)],
+                    'funding_rate', positive=False)
+    funding['funding_rate'] *= 100
+    funding = funding.groupby(funding.index.normalize()).mean()
+    if any(f.empty for f in (prices, interests, funding)):
+        raise ValueError('OKX缺少有效日期的数据')
+    end = min(f.index.max() for f in (prices, interests, funding))
+    if end < current.normalize() - pd.Timedelta(days=1):
+        raise ValueError('OKX日线已过期；停止使用旧持仓判断当前杠杆趋势')
+    start = max(f.index.min() for f in (prices, interests, funding))
+    result = prices.join(interests, how='outer').join(funding, how='outer')
+    result = result.reindex(pd.date_range(start, end, freq='D', name='timestamp'))
+    # Two MA7 observations need eight consecutive days, not eight sparse rows.
+    if len(result) < 8 or result.tail(8).isna().any().any():
+        raise ValueError('最近8天的价格/OI/资金费率存在零值、缺口或样本不足；暂停杠杆信号')
+    result['oi_ma7'] = result.oi.rolling(7, min_periods=7).mean()
+    result['price_ma7'] = result.close.rolling(7, min_periods=7).mean()
+    result.attrs.update(oi_instrument='BTC-USDT-SWAP', oi_unit='USD', day_boundary='UTC',
+                        oi_source='OKX open-interest-history', includes_unfinished_day=end == current.normalize())
+    return result
+
+
+def current_crypto_oi(payload, now=None):
+    current = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz='UTC')
+    current = current.tz_convert('UTC')
+    if payload.get('code') not in (None, '0'):
+        raise ValueError('OKX当前OI接口返回错误')
+    matches = [r for r in payload.get('data', []) if r.get('instId') == 'BTC-USDT-SWAP'
+               and r.get('instType') == 'SWAP']
+    if len(matches) != 1:
+        raise ValueError('未收到BTC-USDT永续合约的唯一OI快照')
+    row = matches[0]
+    value = float(row['oiUsd'])
+    stamp = pd.to_datetime(int(row['ts']), unit='ms', utc=True)
+    age = (current-stamp).total_seconds()
+    if not math.isfinite(value) or value <= 0 or not -60 <= age <= 900:
+        raise ValueError('当前OI为零、无效或已超过15分钟')
+    return {'value': value, 'timestamp': stamp.isoformat(), 'instrument': 'BTC-USDT-SWAP',
+            'unit': 'USD', 'source': 'OKX public/open-interest'}
+
+
+def has_invalid_crypto_oi(record):
+    """Exclude previously saved zero-OI signals, preserving raw audit files."""
+    crypto = record.get('inputs', {}).get('crypto', {})
+    if crypto.get('error'):
+        return True
+    for row in crypto.get('hist_df', {}).get('rows', []):
+        try:
+            if 'oi' in row and (not math.isfinite(float(row['oi'])) or float(row['oi']) <= 0):
+                return True
+        except (ValueError, TypeError):
+            return True
+    return False
+
+
 def daily_records(records):
     """One actual valid observation per trading day; no interpolation/replay."""
     chosen = {}
     for row in sorted(records,key=lambda x:x['observed_at']):
-        if not row.get('quality_ok') or not row.get('trade_date') or row.get('version') != VERSION:
+        if (not row.get('quality_ok') or not row.get('trade_date') or row.get('version') != VERSION
+                or has_invalid_crypto_oi(row)):
             continue
         chosen[row['trade_date']] = row
     return [chosen[k] for k in sorted(chosen)]
