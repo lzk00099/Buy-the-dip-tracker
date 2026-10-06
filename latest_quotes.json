@@ -1,4 +1,35 @@
 {
-  "observed_at": "2026-10-06T01:45:14.117654+00:00",
-  "quotes": []
+  "observed_at": "2026-10-06T09:00:44.744018+00:00",
+  "quotes": [
+    {
+      "symbol": "RSP",
+      "price": 211.3,
+      "timestamp": "2026-10-06T08:37:22+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "^VIX",
+      "price": 15.4399995803833,
+      "timestamp": "2026-10-06T08:45:31+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "IWM",
+      "price": 283.76,
+      "timestamp": "2026-10-06T08:59:10+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "SPY",
+      "price": 776.33,
+      "timestamp": "2026-10-06T09:00:05+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "QQQ",
+      "price": 757.5,
+      "timestamp": "2026-10-06T09:00:22+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    }
+  ]
 }
