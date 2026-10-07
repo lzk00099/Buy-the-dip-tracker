@@ -1,6 +1,6 @@
 {
   "version": "3.0-observed-20260930",
-  "updated_at": "2026-10-07T17:26:32.873419+00:00",
+  "updated_at": "2026-10-07T19:20:48.088258+00:00",
   "records": [
     {
       "version": "3.0-observed-20260930",
@@ -1414,16 +1414,16 @@
           "fetched_at": "2026-10-06 收盘（SqueezeMetrics）"
         },
         "vix": {
-          "vix": 15.26,
-          "vix3m": 17.8,
-          "ratio": 1.166,
+          "vix": 15.07,
+          "vix3m": 17.7,
+          "ratio": 1.175,
           "prev_ratio": 1.175,
           "bottom_active": false,
           "top_active": false,
           "error": false,
           "vix_diag_status": "🟡 风险提示：高位自满情绪规律性压制（建议提高保护性止盈）",
-          "vix_ratio_diag": "【高位自满动能死叉】当前比率(1.166)处于高位警戒带且出现均线转弱死叉 [EMA5:1.164, EMA21:1.169]。多头买盘边际枯竭，情绪转弱，建议分批减仓或收紧止盈。",
-          "vix_spot_diag": "【现货常态理性】当前VIX现货为 15.26，处于合理宽幅震荡区间，情绪中性，大盘系统性踩踏概率较低。",
+          "vix_ratio_diag": "【高位自满动能死叉】当前比率(1.175)处于高位警戒带且出现均线转弱死叉 [EMA5:1.167, EMA21:1.169]。多头买盘边际枯竭，情绪转弱，建议分批减仓或收紧止盈。",
+          "vix_spot_diag": "【现货常态理性】当前VIX现货为 15.07，处于合理宽幅震荡区间，情绪中性，大盘系统性踩踏概率较低。",
           "df": {
             "rows": [
               {
@@ -1436,16 +1436,16 @@
               },
               {
                 "date": "2026-10-07T00:00:00",
-                "^VIX": 15.260000228881836,
-                "^VIX3M": 17.799999237060547,
-                "Ratio": 1.1664481631770478,
-                "Ratio_Fast": 1.1638478772416505,
-                "Ratio_Slow": 1.1686409956763113
+                "^VIX": 15.069999694824219,
+                "^VIX3M": 17.700000762939453,
+                "Ratio": 1.1745189861562177,
+                "Ratio_Fast": 1.1665381515680404,
+                "Ratio_Slow": 1.1693747068562357
               }
             ],
             "metadata": {
               "quote_mode": "regular",
-              "intraday_asof": "2026-10-07T17:11:16+00:00",
+              "intraday_asof": "2026-10-07T19:05:31+00:00",
               "quote_age_minutes": 15.2,
               "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
               "intraday_symbols": [
@@ -1454,13 +1454,13 @@
               ]
             }
           },
-          "fetched_at": "2026-10-07 13:11 ET",
+          "fetched_at": "2026-10-07 15:05 ET",
           "quote_mode": "regular",
           "quote_age_minutes": 15.2,
           "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
         },
         "crypto": {
-          "btc_price": "$83,298.40",
+          "btc_price": "$83,468.70",
           "price_trend": "下跌",
           "oi": "$3,344,260,213 USD",
           "oi_trend": "温和扩张",
@@ -1481,11 +1481,11 @@
               },
               {
                 "timestamp": "2026-10-07T00:00:00+00:00",
-                "close": 83298.4,
+                "close": 83468.7,
                 "oi": 3344260212.9877,
                 "funding_rate": 0.0034645648122399995,
                 "oi_ma7": 3232976051.333071,
-                "price_ma7": 85041.18571428572
+                "price_ma7": 85065.51428571428
               }
             ],
             "metadata": {}
@@ -1498,7 +1498,7 @@
           "cta_status": "多头趋势/系统性买入中",
           "cboe_corr": "相关性:8.33(Z:-0.1)",
           "cboe_disp": "离散度:35.09(Z:-0.4)",
-          "spy_rsp_ratio": 3.6829,
+          "spy_rsp_ratio": 3.6839,
           "cta_bottom_active": false,
           "cta_top_active": false,
           "corr_bottom_active": false,
@@ -1540,7 +1540,7 @@
           },
           "data_source": "live_market_sources",
           "cache_age_hours": 0.0,
-          "fetched_at": "2026-10-07 13:26 ET",
+          "fetched_at": "2026-10-07 15:20 ET",
           "quote_mode": "regular",
           "quote_age_minutes": 0.1,
           "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
@@ -1549,7 +1549,7 @@
           "error": false,
           "level": "中性",
           "status": "⚪ 宏观补充雷达：外部流动性中性，六开关主模型占主导。",
-          "details": "HYG/LQD使用盘前/日内快照；MOVE/VVIX仍按官方盘后日线；授权波动率盘中快照: ^MOVE, ^VVIX（Yahoo 5分钟线（供应商可能延迟））；MOVE债券波动Z:2.0，利率尾部风险抬升；VVIX波动尾部Z:-1.1，期权尾部恐慌缓和；HYG/LQD信用比率修复Z:1.5，信用风险偏好回暖",
+          "details": "HYG/LQD使用盘前/日内快照；MOVE/VVIX仍按官方盘后日线；授权波动率盘中快照: ^MOVE, ^VVIX（Yahoo 5分钟线（供应商可能延迟））；MOVE债券波动Z:1.8，利率尾部风险抬升；VVIX波动尾部Z:-1.2，期权尾部恐慌缓和；HYG/LQD信用比率修复Z:1.5，信用风险偏好回暖",
           "risk_points": 9,
           "opportunity_points": 7,
           "net_adjustment": 2,
@@ -1570,16 +1570,16 @@
               },
               {
                 "index": "2026-10-07T00:00:00",
-                "^MOVE": 105.2051010131836,
-                "HYG": 77.18000030517578,
-                "LQD": 102.15499877929688,
-                "^VVIX": 84.69000244140625
+                "^MOVE": 103.29080200195312,
+                "HYG": 77.13999938964844,
+                "LQD": 102.125,
+                "^VVIX": 83.94000244140625
               }
             ],
             "metadata": {
               "quote_mode": "regular",
-              "intraday_asof": "2026-10-07T17:02:30+00:00",
-              "quote_age_minutes": 24.0,
+              "intraday_asof": "2026-10-07T19:02:30+00:00",
+              "quote_age_minutes": 18.3,
               "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
               "intraday_symbols": [
                 "^MOVE",
@@ -1587,22 +1587,22 @@
               ]
             }
           },
-          "fetched_at": "2026-10-07 13:02 ET",
+          "fetched_at": "2026-10-07 15:02 ET",
           "quote_mode": "regular",
-          "quote_age_minutes": 24.0,
+          "quote_age_minutes": 18.3,
           "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
         },
         "vxn": {
-          "current_spread": 5.94,
-          "current_ratio": 1.39,
-          "fast_curr": 6.03,
+          "current_spread": 6.02,
+          "current_ratio": 1.4,
+          "fast_curr": 6.05,
           "slow_curr": 5.9,
           "bottom_active": false,
           "top_active": true,
           "error": false,
           "combined_diag": "🌋 【火山口】独立踩踏发散中！触发多头硬熔断，严禁接飞刀！",
           "spread_diag": "【动能发散】快线运行于慢线上方，科技股情绪溢价处于风险积聚期。",
-          "ratio_diag": "【极端过热】比率(1.39)突破1.35。纳指多头对冲严重踩踏，极度拥挤。",
+          "ratio_diag": "【极端过热】比率(1.40)突破1.35。纳指多头对冲严重踩踏，极度拥挤。",
           "df_hist": {
             "rows": [
               {
@@ -1616,17 +1616,17 @@
               },
               {
                 "date": "2026-10-07T00:00:00",
-                "^VXN": 21.200000762939453,
-                "^VIX": 15.260000228881836,
-                "Spread": 5.940000534057617,
-                "Ratio": 1.3892529780448677,
-                "Spread_Fast": 6.028216858874513,
-                "Spread_Slow": 5.895209337498469
+                "^VXN": 21.09000015258789,
+                "^VIX": 15.069999694824219,
+                "Spread": 6.020000457763672,
+                "Ratio": 1.399469182459986,
+                "Spread_Fast": 6.054883500109865,
+                "Spread_Slow": 5.902482057835383
               }
             ],
             "metadata": {
               "quote_mode": "regular",
-              "intraday_asof": "2026-10-07T17:11:16+00:00",
+              "intraday_asof": "2026-10-07T19:05:31+00:00",
               "quote_age_minutes": 15.3,
               "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
               "intraday_symbols": [
@@ -1635,7 +1635,7 @@
               ]
             }
           },
-          "fetched_at": "2026-10-07 13:11 ET",
+          "fetched_at": "2026-10-07 15:05 ET",
           "quote_mode": "regular",
           "quote_age_minutes": 15.3,
           "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
@@ -1644,14 +1644,14 @@
           "rows": [
             {
               "symbol": "SPY",
-              "price": 777.5700073242188,
-              "timestamp": "2026-10-07T17:26:28+00:00",
+              "price": 777.030029296875,
+              "timestamp": "2026-10-07T19:20:43+00:00",
               "source": "Yahoo 5分钟线（供应商可能延迟）"
             },
             {
-              "symbol": "HYG",
-              "price": 77.18000030517578,
-              "timestamp": "2026-10-07T17:26:28+00:00",
+              "symbol": "^GSPC",
+              "price": 7798.16015625,
+              "timestamp": "2026-10-07T19:20:43+00:00",
               "source": "Yahoo 5分钟线（供应商可能延迟）"
             }
           ],
@@ -1673,8 +1673,8 @@
           "LQD": "2026-10-07"
         }
       },
-      "id": "54c761a42b79b48a39f378dcec6fd04a626c5c534c53687c8348af7abf90f3bb",
-      "observed_at": "2026-10-07T17:26:32.873419+00:00",
+      "id": "341b32a46f3e1c535d59dab8d3c9d71a006063c45bdc31e1a56d9f940888067d",
+      "observed_at": "2026-10-07T19:20:48.088258+00:00",
       "trade_date": "2026-10-07",
       "session": "regular",
       "quality_ok": true,
