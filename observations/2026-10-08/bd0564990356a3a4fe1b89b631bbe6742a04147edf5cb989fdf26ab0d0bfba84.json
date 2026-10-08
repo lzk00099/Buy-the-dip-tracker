@@ -1,0 +1,343 @@
+{
+  "version": "3.0-observed-20260930",
+  "scores": {
+    "weighted_risk": 55.004339423111986,
+    "weighted_opportunity": 17.173175801334647,
+    "macro_adjustment": 5.0,
+    "neutral_baseline": 7.461401013747584,
+    "net_risk": 35.36976260802975
+  },
+  "components": [
+    {
+      "id": 2,
+      "risk_score": 50,
+      "opportunity_score": 0,
+      "effective_weight": 1.2420000000000002
+    },
+    {
+      "id": 1,
+      "risk_score": 12,
+      "opportunity_score": 68,
+      "effective_weight": 0.925
+    },
+    {
+      "id": 5,
+      "risk_score": 100,
+      "opportunity_score": 0,
+      "effective_weight": 0.9675999999999999
+    },
+    {
+      "id": 6,
+      "risk_score": 92,
+      "opportunity_score": 0,
+      "effective_weight": 0.9660000000000001
+    },
+    {
+      "id": 4,
+      "risk_score": 30,
+      "opportunity_score": 25,
+      "effective_weight": 0.7215999999999999
+    },
+    {
+      "id": 3,
+      "risk_score": 32,
+      "opportunity_score": 20,
+      "effective_weight": 0.6624
+    }
+  ],
+  "inputs": {
+    "dix": {
+      "error": false,
+      "is_mock": false,
+      "dix": 47.87944748193433,
+      "gex": 7837732846.9699955,
+      "df": {
+        "rows": [
+          {
+            "index": 3880,
+            "date": "2026-10-06T00:00:00",
+            "price": 7818.93,
+            "dix": 48.273262035913525,
+            "gex": 8630643742.630001
+          },
+          {
+            "index": 3881,
+            "date": "2026-10-07T00:00:00",
+            "price": 7801.77,
+            "dix": 47.87944748193433,
+            "gex": 7837732846.9699955
+          }
+        ],
+        "metadata": {}
+      },
+      "data_date": "2026-10-07",
+      "fetched_at": "2026-10-07 收盘（SqueezeMetrics）"
+    },
+    "vix": {
+      "vix": 15.63,
+      "vix3m": 18.2,
+      "ratio": 1.164,
+      "prev_ratio": 1.175,
+      "bottom_active": false,
+      "top_active": false,
+      "error": false,
+      "vix_diag_status": "🟡 风险提示：高位自满情绪规律性压制（建议提高保护性止盈）",
+      "vix_ratio_diag": "【高位自满动能死叉】当前比率(1.164)处于高位警戒带且出现均线转弱死叉 [EMA5:1.166, EMA21:1.169]。多头买盘边际枯竭，情绪转弱，建议分批减仓或收紧止盈。",
+      "vix_spot_diag": "【现货常态理性】当前VIX现货为 15.63，处于合理宽幅震荡区间，情绪中性，大盘系统性踩踏概率较低。",
+      "df": {
+        "rows": [
+          {
+            "date": "2026-10-07T00:00:00",
+            "^VIX": 15.08,
+            "^VIX3M": 17.72,
+            "Ratio": 1.1750663129973473,
+            "Ratio_Fast": 1.166720593848417,
+            "Ratio_Slow": 1.169424465918286
+          },
+          {
+            "date": "2026-10-08T00:00:00",
+            "^VIX": 15.630000114440918,
+            "^VIX3M": 18.200000762939453,
+            "Ratio": 1.1644274235240761,
+            "Ratio_Fast": 1.1659562037403035,
+            "Ratio_Slow": 1.168970189336994
+          }
+        ],
+        "metadata": {
+          "quote_mode": "regular",
+          "intraday_asof": "2026-10-08T19:00:16+00:00",
+          "quote_age_minutes": 15.2,
+          "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
+          "intraday_symbols": [
+            "^VIX",
+            "^VIX3M"
+          ]
+        }
+      },
+      "fetched_at": "2026-10-08 15:00 ET",
+      "quote_mode": "regular",
+      "quote_age_minutes": 15.2,
+      "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    "crypto": {
+      "btc_price": "$81,509.60",
+      "price_trend": "下跌",
+      "oi": "$3,300,573,828 USD",
+      "oi_trend": "温和扩张",
+      "funding_rate": "0.0041%",
+      "diag_status": "⚪ 【震荡博弈/观望】价格均线缠绕，OI变动平缓(温和扩张)，系统处于风险真空期。",
+      "bottom_active": false,
+      "top_active": false,
+      "error": false,
+      "hist_df": {
+        "rows": [
+          {
+            "timestamp": "2026-10-07T00:00:00+00:00",
+            "close": 83323.0,
+            "oi": 3344260212.9877,
+            "funding_rate": 0.0034645648122399995,
+            "oi_ma7": 3232976051.3330717,
+            "price_ma7": 85044.69999999998
+          },
+          {
+            "timestamp": "2026-10-08T00:00:00+00:00",
+            "close": 81509.6,
+            "oi": 3300573828.4821,
+            "funding_rate": 0.004130137149693334,
+            "oi_ma7": 3253451285.4065857,
+            "price_ma7": 84563.58571428571
+          }
+        ],
+        "metadata": {}
+      },
+      "data_date": "2026-10-08",
+      "fetched_at": "2026-10-08 UTC 日线（非实时BTC）"
+    },
+    "quant": {
+      "error": false,
+      "cta_status": "多头趋势/系统性买入中",
+      "cboe_corr": "相关性:8.01(Z:-0.3)",
+      "cboe_disp": "离散度:36.11(Z:-0.2)",
+      "spy_rsp_ratio": 3.6498,
+      "cta_bottom_active": false,
+      "cta_top_active": false,
+      "corr_bottom_active": false,
+      "breadth_top_active": true,
+      "corr_is_broken": false,
+      "corr_date": "2026-10-07",
+      "dspx_date": "2026-10-07",
+      "corr_diag": "【相关性退潮(Z:-0.3)】市场共振消退，逐步回归理性",
+      "disp_diag": "【离散度分化发散(Z:-0.2)】两极分化加剧，抱团失血效应显著",
+      "combined_diag": "🚨 【象限 III: 极致撕裂】大盘失真，资金极致抱团超级权重，掩护中小盘出货（触发终极广度逃顶线）",
+      "corr_risk_level": "极高风险",
+      "corr_risk_diag": "相关性退潮但离散度爆发，代表指数表面稳定、内部广度崩塌；若指数仍在高位，属于典型抱团掩护出货。",
+      "df_hist": {
+        "rows": [
+          {
+            "Date": "2026-10-07T00:00:00",
+            "corr": 8.01,
+            "corr_fast": 8.399712594674664,
+            "corr_slow": 9.20318555989093,
+            "dspx": 36.11,
+            "dsp_fast": 35.52565202171427,
+            "dsp_slow": 35.01225227872571,
+            "cta_shorts": 0,
+            "cta_longs": 0
+          },
+          {
+            "Date": "2026-10-08T00:00:00",
+            "corr": null,
+            "corr_fast": null,
+            "corr_slow": null,
+            "dspx": null,
+            "dsp_fast": null,
+            "dsp_slow": null,
+            "cta_shorts": 0,
+            "cta_longs": 0
+          }
+        ],
+        "metadata": {}
+      },
+      "data_source": "live_market_sources",
+      "cache_age_hours": 0.0,
+      "fetched_at": "2026-10-08 15:15 ET",
+      "quote_mode": "regular",
+      "quote_age_minutes": 0.1,
+      "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    "macro": {
+      "error": false,
+      "level": "中性",
+      "status": "⚪ 宏观补充雷达：外部流动性中性，六开关主模型占主导。",
+      "details": "HYG/LQD使用盘前/日内快照；MOVE/VVIX仍按官方盘后日线；授权波动率盘中快照: ^MOVE, ^VVIX（Yahoo 5分钟线（供应商可能延迟））；MOVE债券波动Z:1.5，利率尾部风险抬升；HYG/LQD信用比率修复Z:0.7，信用风险偏好回暖",
+      "risk_points": 9,
+      "opportunity_points": 4,
+      "net_adjustment": 5,
+      "source_dates": {
+        "^MOVE": "2026-10-08",
+        "^VVIX": "2026-10-08",
+        "HYG": "2026-10-08",
+        "LQD": "2026-10-08"
+      },
+      "hist_df": {
+        "rows": [
+          {
+            "index": "2026-10-07T00:00:00",
+            "^MOVE": 102.55999755859375,
+            "HYG": 77.18000030517578,
+            "LQD": 102.0999984741211,
+            "^VVIX": 83.18
+          },
+          {
+            "index": "2026-10-08T00:00:00",
+            "^MOVE": 99.71640014648438,
+            "HYG": 77.125,
+            "LQD": 102.48999786376953,
+            "^VVIX": 88.16999816894531
+          }
+        ],
+        "metadata": {
+          "quote_mode": "regular",
+          "intraday_asof": "2026-10-08T18:47:30+00:00",
+          "quote_age_minutes": 28.0,
+          "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
+          "intraday_symbols": [
+            "^MOVE",
+            "^VVIX"
+          ]
+        }
+      },
+      "fetched_at": "2026-10-08 14:47 ET",
+      "quote_mode": "regular",
+      "quote_age_minutes": 28.0,
+      "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    "vxn": {
+      "current_spread": 6.61,
+      "current_ratio": 1.42,
+      "fast_curr": 6.22,
+      "slow_curr": 5.96,
+      "bottom_active": false,
+      "top_active": true,
+      "error": false,
+      "combined_diag": "🌋 【火山口】独立踩踏发散中！触发多头硬熔断，严禁接飞刀！",
+      "spread_diag": "【动能发散】快线运行于慢线上方，科技股情绪溢价处于风险积聚期。",
+      "ratio_diag": "【极端过热】比率(1.42)突破1.35。纳指多头对冲严重踩踏，极度拥挤。",
+      "df_hist": {
+        "rows": [
+          {
+            "date": "2026-10-07T00:00:00",
+            "^VXN": 21.0,
+            "^VIX": 15.08,
+            "Spread": 5.92,
+            "Ratio": 1.3925729442970822,
+            "Spread_Fast": 6.021550014188641,
+            "Spread_Slow": 5.893391112974811
+          },
+          {
+            "date": "2026-10-08T00:00:00",
+            "^VXN": 22.239999771118164,
+            "^VIX": 15.630000114440918,
+            "Spread": 6.609999656677246,
+            "Ratio": 1.4229046454433558,
+            "Spread_Fast": 6.2176998950181765,
+            "Spread_Slow": 5.958537344220487
+          }
+        ],
+        "metadata": {
+          "quote_mode": "regular",
+          "intraday_asof": "2026-10-08T19:00:16+00:00",
+          "quote_age_minutes": 15.2,
+          "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
+          "intraday_symbols": [
+            "^VXN",
+            "^VIX"
+          ]
+        }
+      },
+      "fetched_at": "2026-10-08 15:00 ET",
+      "quote_mode": "regular",
+      "quote_age_minutes": 15.2,
+      "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    "quotes": {
+      "rows": [
+        {
+          "symbol": "^GSPC",
+          "price": 7756.759765625,
+          "timestamp": "2026-10-08T19:15:24+00:00",
+          "source": "Yahoo 5分钟线（供应商可能延迟）"
+        },
+        {
+          "symbol": "^NDX",
+          "price": 30663.015625,
+          "timestamp": "2026-10-08T19:15:24+00:00",
+          "source": "Yahoo 5分钟线（供应商可能延迟）"
+        }
+      ],
+      "metadata": {
+        "provider_errors": []
+      }
+    },
+    "source_dates": {
+      "DIX": "2026-10-07",
+      "VIX/VIX3M": "2026-10-08",
+      "VXN/VIX": "2026-10-08",
+      "ETF": "2026-10-08",
+      "COR1M": "2026-10-07",
+      "DSPX": "2026-10-07",
+      "OKX": "2026-10-08",
+      "^MOVE": "2026-10-08",
+      "^VVIX": "2026-10-08",
+      "HYG": "2026-10-08",
+      "LQD": "2026-10-08"
+    }
+  },
+  "id": "bd0564990356a3a4fe1b89b631bbe6742a04147edf5cb989fdf26ab0d0bfba84",
+  "observed_at": "2026-10-08T19:15:29.652484+00:00",
+  "trade_date": "2026-10-08",
+  "session": "regular",
+  "quality_ok": true,
+  "input_trade_date": "2026-10-08",
+  "origin": "scheduled_observation"
+}
