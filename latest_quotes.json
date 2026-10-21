@@ -1,47 +1,4 @@
 {
-  "observed_at": "2026-10-20T21:33:34.432851+00:00",
-  "quotes": [
-    {
-      "symbol": "LQD",
-      "price": 103.25,
-      "timestamp": "2026-10-20T20:58:52+00:00",
-      "source": "Yahoo 5分钟线（供应商可能延迟）"
-    },
-    {
-      "symbol": "RSP",
-      "price": 216.3439,
-      "timestamp": "2026-10-20T21:03:42+00:00",
-      "source": "Yahoo 5分钟线（供应商可能延迟）"
-    },
-    {
-      "symbol": "HYG",
-      "price": 76.83,
-      "timestamp": "2026-10-20T21:10:56+00:00",
-      "source": "Yahoo 5分钟线（供应商可能延迟）"
-    },
-    {
-      "symbol": "^NDX",
-      "price": 29490.283,
-      "timestamp": "2026-10-20T21:15:00+00:00",
-      "source": "Yahoo 5分钟线（供应商可能延迟）"
-    },
-    {
-      "symbol": "QQQ",
-      "price": 722.0,
-      "timestamp": "2026-10-20T21:31:52+00:00",
-      "source": "Yahoo 5分钟线（供应商可能延迟）"
-    },
-    {
-      "symbol": "SPY",
-      "price": 771.508,
-      "timestamp": "2026-10-20T21:32:45+00:00",
-      "source": "Yahoo 5分钟线（供应商可能延迟）"
-    },
-    {
-      "symbol": "IWM",
-      "price": 276.31,
-      "timestamp": "2026-10-20T21:33:09+00:00",
-      "source": "Yahoo 5分钟线（供应商可能延迟）"
-    }
-  ]
+  "observed_at": "2026-10-21T00:07:34.927211+00:00",
+  "quotes": []
 }
