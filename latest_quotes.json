@@ -1,4 +1,41 @@
 {
-  "observed_at": "2026-11-05T01:02:32.912412+00:00",
-  "quotes": []
+  "observed_at": "2026-11-05T09:31:50.310657+00:00",
+  "quotes": [
+    {
+      "symbol": "HYG",
+      "price": 77.52,
+      "timestamp": "2026-11-05T09:00:00+00:00",
+      "source": "Nasdaq 公开报价（可能延迟）"
+    },
+    {
+      "symbol": "LQD",
+      "price": 104.77,
+      "timestamp": "2026-11-05T09:01:15+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "RSP",
+      "price": 223.97,
+      "timestamp": "2026-11-05T09:07:36+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "IWM",
+      "price": 284.68,
+      "timestamp": "2026-11-05T09:28:03+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "SPY",
+      "price": 765.82,
+      "timestamp": "2026-11-05T09:30:21+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "QQQ",
+      "price": 685.1,
+      "timestamp": "2026-11-05T09:31:11+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    }
+  ]
 }
