@@ -1,6 +1,6 @@
 {
   "version": "3.0-observed-20260930",
-  "updated_at": "2026-11-11T17:55:10.486244+00:00",
+  "updated_at": "2026-11-11T20:09:43.780403+00:00",
   "records": [
     {
       "version": "3.0-observed-20260930",
@@ -9942,16 +9942,16 @@
           "fetched_at": "2026-11-10 收盘（SqueezeMetrics）"
         },
         "vix": {
-          "vix": 17.66,
-          "vix3m": 19.52,
-          "ratio": 1.105,
+          "vix": 17.43,
+          "vix3m": 19.34,
+          "ratio": 1.11,
           "prev_ratio": 1.061,
           "bottom_active": false,
           "top_active": false,
           "error": false,
           "vix_diag_status": "🟢 状态中性：健康常态化牛市状态",
-          "vix_ratio_diag": "【比率常态健康中轴】当前比率(1.105)在1.0-1.15 Contango区间稳健运行 [EMA5:1.056, EMA21:1.074]。期限结构和情绪动能健康，大盘暂无宏观性异动异变风险。",
-          "vix_spot_diag": "【现货常态理性】当前VIX现货为 17.66，处于合理宽幅震荡区间，情绪中性，大盘系统性踩踏概率较低。",
+          "vix_ratio_diag": "【比率常态健康中轴】当前比率(1.110)在1.0-1.15 Contango区间稳健运行 [EMA5:1.057, EMA21:1.074]。期限结构和情绪动能健康，大盘暂无宏观性异动异变风险。",
+          "vix_spot_diag": "【现货常态理性】当前VIX现货为 17.43，处于合理宽幅震荡区间，情绪中性，大盘系统性踩踏概率较低。",
           "df": {
             "rows": [
               {
@@ -9964,16 +9964,16 @@
               },
               {
                 "date": "2026-11-11T00:00:00",
-                "^VIX": 17.65999984741211,
-                "^VIX3M": 19.520000457763672,
-                "Ratio": 1.1053227987781735,
-                "Ratio_Fast": 1.056021673526145,
-                "Ratio_Slow": 1.0735085211965325
+                "^VIX": 17.43000030517578,
+                "^VIX3M": 19.34000015258789,
+                "Ratio": 1.1095811711973946,
+                "Ratio_Fast": 1.0574411309992189,
+                "Ratio_Slow": 1.0738956459619162
               }
             ],
             "metadata": {
               "quote_mode": "regular",
-              "intraday_asof": "2026-11-11T17:40:01+00:00",
+              "intraday_asof": "2026-11-11T19:54:31+00:00",
               "quote_age_minutes": 15.1,
               "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
               "intraday_symbols": [
@@ -9982,13 +9982,13 @@
               ]
             }
           },
-          "fetched_at": "2026-11-11 12:40 ET",
+          "fetched_at": "2026-11-11 14:54 ET",
           "quote_mode": "regular",
           "quote_age_minutes": 15.1,
           "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
         },
         "crypto": {
-          "btc_price": "$74,568.20",
+          "btc_price": "$74,482.20",
           "price_trend": "上涨",
           "oi": "$3,846,958,624 USD",
           "oi_trend": "温和扩张",
@@ -10009,11 +10009,11 @@
               },
               {
                 "timestamp": "2026-11-11T00:00:00+00:00",
-                "close": 74568.2,
+                "close": 74482.2,
                 "oi": 3846958623.5756,
                 "funding_rate": 0.008002782762853334,
                 "oi_ma7": 3808575034.3454714,
-                "price_ma7": 75196.54285714286
+                "price_ma7": 75184.25714285715
               }
             ],
             "metadata": {}
@@ -10026,7 +10026,7 @@
           "cta_status": "多头趋势/系统性买入中",
           "cboe_corr": "相关性:12.35(Z:0.7)",
           "cboe_disp": "离散度:39.50(Z:1.7)",
-          "spy_rsp_ratio": 3.4223,
+          "spy_rsp_ratio": 3.4135,
           "cta_bottom_active": false,
           "cta_top_active": false,
           "corr_bottom_active": false,
@@ -10068,9 +10068,9 @@
           },
           "data_source": "live_market_sources",
           "cache_age_hours": 0.0,
-          "fetched_at": "2026-11-11 12:55 ET",
+          "fetched_at": "2026-11-11 15:09 ET",
           "quote_mode": "regular",
-          "quote_age_minutes": 0.1,
+          "quote_age_minutes": 0.2,
           "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
         },
         "macro": {
@@ -10099,14 +10099,14 @@
               {
                 "index": "2026-11-11T00:00:00",
                 "^MOVE": null,
-                "HYG": 77.36499786376953,
-                "LQD": 103.92720031738281,
-                "^VVIX": 93.08000183105469
+                "HYG": 77.37000274658203,
+                "LQD": 103.95500183105469,
+                "^VVIX": 91.56999969482422
               }
             ],
             "metadata": {
               "quote_mode": "regular",
-              "intraday_asof": "2026-11-11T17:40:01+00:00",
+              "intraday_asof": "2026-11-11T19:54:31+00:00",
               "quote_age_minutes": 15.2,
               "quote_sources": "Yahoo 5分钟线（供应商可能延迟）",
               "intraday_symbols": [
@@ -10114,7 +10114,7 @@
               ]
             }
           },
-          "fetched_at": "2026-11-11 12:40 ET",
+          "fetched_at": "2026-11-11 14:54 ET",
           "quote_mode": "regular",
           "quote_age_minutes": 15.2,
           "quote_sources": "Yahoo 5分钟线（供应商可能延迟）"
@@ -10164,14 +10164,14 @@
           "rows": [
             {
               "symbol": "^NDX",
-              "price": 28541.544921875,
-              "timestamp": "2026-11-11T17:55:04+00:00",
+              "price": 28420.63671875,
+              "timestamp": "2026-11-11T20:09:38+00:00",
               "source": "Yahoo 5分钟线（供应商可能延迟）"
             },
             {
               "symbol": "^GSPC",
-              "price": 7635.47021484375,
-              "timestamp": "2026-11-11T17:55:04+00:00",
+              "price": 7624.7998046875,
+              "timestamp": "2026-11-11T20:09:38+00:00",
               "source": "Yahoo 5分钟线（供应商可能延迟）"
             }
           ],
@@ -10196,8 +10196,8 @@
           "LQD": "2026-11-11"
         }
       },
-      "id": "e7f6a101a47f3480015cca899be430e2030a2ae350a01ea556423d104163f948",
-      "observed_at": "2026-11-11T17:55:10.486244+00:00",
+      "id": "0483a500464537c352541da0bf89ca4db9e13862666a47fd4d8c7d43344d4349",
+      "observed_at": "2026-11-11T20:09:43.780403+00:00",
       "trade_date": "2026-11-11",
       "session": "regular",
       "quality_ok": true,
