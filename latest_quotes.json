@@ -1,34 +1,82 @@
 {
-  "observed_at": "2026-11-19T10:23:34.230889+00:00",
+  "observed_at": "2026-11-19T21:26:14.672536+00:00",
   "quotes": [
     {
-      "symbol": "RSP",
-      "price": 216.61,
-      "timestamp": "2026-11-19T09:50:09+00:00",
+      "symbol": "^NDX",
+      "price": 26517.05078125,
+      "timestamp": "2026-11-19T21:00:00+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "^GSPC",
+      "price": 7175.830078125,
+      "timestamp": "2026-11-19T21:00:00+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "^VIX3M",
+      "price": 27.200000762939453,
+      "timestamp": "2026-11-19T21:00:00+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "^VVIX",
+      "price": 128.3800048828125,
+      "timestamp": "2026-11-19T21:00:00+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "^VXN",
+      "price": 36.650001525878906,
+      "timestamp": "2026-11-19T21:00:00+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "^MOVE",
+      "price": 96.0031967163086,
+      "timestamp": "2026-11-19T21:00:00+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "LQD",
+      "price": 103.08,
+      "timestamp": "2026-11-19T21:00:24+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "HYG",
+      "price": 76.553,
+      "timestamp": "2026-11-19T21:01:18+00:00",
       "source": "Yahoo 5分钟线（供应商可能延迟）"
     },
     {
       "symbol": "^VIX",
-      "price": 22.170000076293945,
-      "timestamp": "2026-11-19T10:08:16+00:00",
+      "price": 28.75,
+      "timestamp": "2026-11-19T21:10:00+00:00",
+      "source": "Yahoo 5分钟线（供应商可能延迟）"
+    },
+    {
+      "symbol": "RSP",
+      "price": 212.0491,
+      "timestamp": "2026-11-19T21:21:34+00:00",
       "source": "Yahoo 5分钟线（供应商可能延迟）"
     },
     {
       "symbol": "IWM",
-      "price": 271.66,
-      "timestamp": "2026-11-19T10:20:09+00:00",
+      "price": 263.7954,
+      "timestamp": "2026-11-19T21:24:52+00:00",
       "source": "Yahoo 5分钟线（供应商可能延迟）"
     },
     {
       "symbol": "SPY",
-      "price": 738.58,
-      "timestamp": "2026-11-19T10:22:38+00:00",
+      "price": 714.99,
+      "timestamp": "2026-11-19T21:25:56+00:00",
       "source": "Yahoo 5分钟线（供应商可能延迟）"
     },
     {
       "symbol": "QQQ",
-      "price": 673.25,
-      "timestamp": "2026-11-19T10:23:22+00:00",
+      "price": 643.87,
+      "timestamp": "2026-11-19T21:26:04+00:00",
       "source": "Yahoo 5分钟线（供应商可能延迟）"
     }
   ]
